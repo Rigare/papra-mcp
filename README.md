@@ -1,25 +1,49 @@
-# Papra MCP Server (Python)
+# Papra MCP Server
 
-MCP server for the [Papra](https://papra.app) document management API.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 
-## Setup
+An [MCP](https://modelcontextprotocol.io) (Model Context Protocol) server for the [Papra](https://papra.app) document management API. Gives AI assistants the ability to manage organizations, documents, and tags in your Papra instance.
+
+## Prerequisites
+
+- Python 3.10+
+- A running [Papra](https://github.com/papra-hq/papra) instance
+- An API key from your Papra account settings
+
+## Installation
 
 ```bash
+git clone https://github.com/mwit78/papra-mcp.git
+cd papra-mcp
 pip install -r requirements.txt
 ```
 
-## Configure for Claude Desktop
+## Configuration
 
-Add to `claude_desktop_config.json`:
+The server requires two environment variables:
+
+| Variable | Description |
+|----------|-------------|
+| `PAPRA_BASE_URL` | Your Papra instance URL (e.g. `https://papra.example.com`) |
+| `PAPRA_API_KEY` | API key from your Papra account settings |
+
+Both are validated at startup. The server will exit with a clear error if either is missing.
+
+## Usage
+
+### Claude Desktop
+
+Add the following to your `claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
     "papra": {
       "command": "python",
-      "args": ["C:/Users/marco/mcp/papra_mcp/papra_mcp.py"],
+      "args": ["/path/to/papra-mcp/papra_mcp.py"],
       "env": {
-        "PAPRA_BASE_URL": "https://papra.partiri.net",
+        "PAPRA_BASE_URL": "https://papra.example.com",
         "PAPRA_API_KEY": "your-api-key-here"
       }
     }
@@ -27,14 +51,23 @@ Add to `claude_desktop_config.json`:
 }
 ```
 
-## Environment Variables
+### Claude Code
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `PAPRA_BASE_URL` | Yes | Your Papra instance URL (e.g. `https://papra.example.com`) |
-| `PAPRA_API_KEY` | Yes | API key from Papra account settings |
+Add via the CLI:
 
-Both variables are validated at server startup. The server will fail with a clear error message if either is missing.
+```bash
+claude mcp add papra -- python /path/to/papra-mcp/papra_mcp.py
+```
+
+Then set the environment variables in your shell or `.env` file before launching Claude Code.
+
+### Development
+
+Use the MCP inspector to test tools interactively:
+
+```bash
+mcp dev papra_mcp.py
+```
 
 ## Tools (21)
 
@@ -50,7 +83,7 @@ Both variables are validated at server startup. The server will fail with a clea
 |------|-------------|
 | `papra_list_organizations` | List all accessible organizations |
 | `papra_get_organization` | Get details of a specific organization |
-| `papra_create_organization` | Create a new organization (name: 3–50 chars) |
+| `papra_create_organization` | Create a new organization (name: 3-50 chars) |
 | `papra_update_organization` | Update an organization's name |
 | `papra_delete_organization` | Delete an organization (**destructive**) |
 
@@ -78,3 +111,7 @@ Both variables are validated at server startup. The server will fail with a clea
 | `papra_add_tag_to_document` | Associate a tag with a document |
 | `papra_remove_tag_from_document` | Remove a tag from a document |
 | `papra_apply_tagging_rule` | Apply a tagging rule to all existing documents (background task) |
+
+## License
+
+[Apache-2.0](LICENSE)
