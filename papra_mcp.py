@@ -1,0 +1,707 @@
+#!/usr/bin/env python3
+"""Papra MCP Server — MCP server for the Papra document management API."""
+
+import json
+import os
+from contextlib import asynccontextmanager
+from typing import Any
+
+import httpx
+from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel, Field
+
+# ---------------------------------------------------------------------------
+# HTTP client
+# ---------------------------------------------------------------------------
+
+_client: httpx.AsyncClient | None = None
+
+
+@asynccontextmanager
+async def lifespan(_server):
+    """Manage the HTTP client lifecycle and validate configuration."""
+    global _client
+    base_url = os.environ.get("PAPRA_BASE_URL", "").rstrip("/")
+    api_key = os.environ.get("PAPRA_API_KEY", "")
+
+    if not base_url:
+        raise RuntimeError(
+            "PAPRA_BASE_URL environment variable is required. "
+            "Set it to your Papra instance URL (e.g. https://papra.example.com)"
+        )
+    if not api_key:
+        raise RuntimeError(
+            "PAPRA_API_KEY environment variable is required. "
+            "Create an API key in your Papra account settings."
+        )
+
+    _client = httpx.AsyncClient(
+        base_url=base_url,
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=30.0,
+    )
+    try:
+        yield {}
+    finally:
+        await _client.aclose()
+        _client = None
+
+
+async def papra_request(
+    method: str,
+    path: str,
+    *,
+    body: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
+) -> Any:
+    """Make an authenticated request to the Papra API."""
+    if _client is None:
+        raise RuntimeError("HTTP client not initialized \u2014 server lifespan not started.")
+    # Strip None values from params
+    if params:
+        params = {k: v for k, v in params.items() if v is not None}
+
+    response = await _client.request(
+        method,
+        path,
+        json=body,
+        params=params or None,
+    )
+    response.raise_for_status()
+
+    if response.status_code == 204:
+        return {}
+    return response.json()
+
+
+def format_error(exc: Exception) -> str:
+    """Format an exception into an actionable error message."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        try:
+            detail = exc.response.json().get("message", exc.response.text)
+        except Exception:
+            detail = exc.response.text
+        return (
+            f"Papra API error ({exc.response.status_code}): {detail}. "
+            "Check the API key permissions and resource IDs."
+        )
+    return f"Error: {exc}"
+
+
+def _json(data: Any) -> str:
+    return json.dumps(data, indent=2, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# Server
+# ---------------------------------------------------------------------------
+
+mcp = FastMCP("papra_mcp", lifespan=lifespan)
+
+# ---------------------------------------------------------------------------
+# Input models
+# ---------------------------------------------------------------------------
+
+
+# -- Base models --
+
+
+class OrgBase(BaseModel):
+    organization_id: str = Field(..., description="The organization ID", min_length=1)
+
+
+class PaginatedOrgBase(OrgBase):
+    page_index: int = Field(default=0, description="Page index (0-based)", ge=0)
+    page_size: int = Field(default=100, description="Items per page (1-100)", ge=1, le=100)
+
+
+class DocBase(OrgBase):
+    document_id: str = Field(..., description="The document ID", min_length=1)
+
+
+# -- Organization models --
+
+OrgId = OrgBase
+
+
+class CreateOrgInput(BaseModel):
+    name: str = Field(..., description="Organization name (3-50 characters)", min_length=3, max_length=50)
+
+
+class OrgName(OrgBase):
+    name: str = Field(..., description="Organization name (3-50 characters)", min_length=3, max_length=50)
+
+
+# -- Document models --
+
+DocId = DocBase
+
+
+class ListDocsInput(PaginatedOrgBase):
+    search_query: str | None = Field(
+        default=None,
+        description="Optional search query. Supports filters: name:, content:, tag:, created: and operators AND, OR, NOT",
+    )
+
+
+PaginatedOrgInput = PaginatedOrgBase
+
+
+class SearchDocsInput(PaginatedOrgBase):
+    search_query: str = Field(..., description="Search query string", min_length=1)
+
+
+class UpdateDocInput(DocBase):
+    name: str | None = Field(default=None, description="New document name")
+    content: str | None = Field(default=None, description="New document content (for search)")
+
+
+class DocActivityInput(DocBase):
+    page_index: int = Field(default=0, ge=0)
+    page_size: int = Field(default=100, ge=1, le=100)
+
+
+# -- Tag models --
+
+
+class CreateTagInput(OrgBase):
+    name: str = Field(..., description="Tag name", min_length=1)
+    color: str = Field(..., description="Hex color (e.g. #FF0000)", pattern=r"^#[0-9a-fA-F]{6}$")
+    description: str | None = Field(default=None, description="Optional tag description")
+
+
+class UpdateTagInput(OrgBase):
+    tag_id: str = Field(..., description="The tag ID", min_length=1)
+    name: str | None = Field(default=None, description="New tag name")
+    color: str | None = Field(default=None, description="New hex color", pattern=r"^#[0-9a-fA-F]{6}$")
+    description: str | None = Field(default=None, description="New description")
+
+
+class TagIdInput(OrgBase):
+    tag_id: str = Field(..., description="The tag ID", min_length=1)
+
+
+class DocTagInput(DocBase):
+    tag_id: str = Field(..., description="The tag ID", min_length=1)
+
+
+class ApplyTaggingRuleInput(OrgBase):
+    tagging_rule_id: str = Field(..., description="The tagging rule ID", min_length=1)
+
+
+# ---------------------------------------------------------------------------
+# API Key
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(
+    name="papra_check_api_key",
+    annotations={
+        "title": "Check API Key",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_check_api_key() -> str:
+    """Check the currently used API key. Returns the key's ID, name, and permissions."""
+    try:
+        data = await papra_request("GET", "/api/api-keys/current")
+        return _json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Organizations
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(
+    name="papra_list_organizations",
+    annotations={
+        "title": "List Organizations",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_list_organizations() -> str:
+    """List all organizations accessible to the authenticated user."""
+    try:
+        data = await papra_request("GET", "/api/organizations")
+        return _json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_get_organization",
+    annotations={
+        "title": "Get Organization",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_get_organization(params: OrgId) -> str:
+    """Get details of a specific organization by its ID."""
+    try:
+        data = await papra_request("GET", f"/api/organizations/{params.organization_id}")
+        return _json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_create_organization",
+    annotations={
+        "title": "Create Organization",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+async def papra_create_organization(params: CreateOrgInput) -> str:
+    """Create a new organization. The name must be 3-50 characters."""
+    try:
+        data = await papra_request("POST", "/api/organizations", body={"name": params.name})
+        return _json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_update_organization",
+    annotations={
+        "title": "Update Organization",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_update_organization(params: OrgName) -> str:
+    """Update an organization's name."""
+    try:
+        data = await papra_request(
+            "PUT", f"/api/organizations/{params.organization_id}", body={"name": params.name}
+        )
+        return _json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_delete_organization",
+    annotations={
+        "title": "Delete Organization",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+async def papra_delete_organization(params: OrgId) -> str:
+    """Delete an organization by its ID. This is a destructive operation."""
+    try:
+        await papra_request("DELETE", f"/api/organizations/{params.organization_id}")
+        return f"Organization {params.organization_id} deleted successfully."
+    except Exception as exc:
+        return format_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Documents
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(
+    name="papra_list_documents",
+    annotations={
+        "title": "List Documents",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_list_documents(params: ListDocsInput) -> str:
+    """List documents in an organization with optional pagination and search.
+
+    The searchQuery supports advanced filters like name:, content:, tag:, created:
+    and logical operators AND, OR, NOT.
+    """
+    try:
+        data = await papra_request(
+            "GET",
+            f"/api/organizations/{params.organization_id}/documents",
+            params={
+                "pageIndex": params.page_index,
+                "pageSize": params.page_size,
+                "searchQuery": params.search_query,
+            },
+        )
+        return _json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_list_deleted_documents",
+    annotations={
+        "title": "List Deleted Documents (Trash)",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_list_deleted_documents(params: PaginatedOrgInput) -> str:
+    """List deleted documents (trash) in an organization."""
+    try:
+        data = await papra_request(
+            "GET",
+            f"/api/organizations/{params.organization_id}/documents/deleted",
+            params={"pageIndex": params.page_index, "pageSize": params.page_size},
+        )
+        return _json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_get_document",
+    annotations={
+        "title": "Get Document",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_get_document(params: DocId) -> str:
+    """Get a document's metadata by its ID."""
+    try:
+        data = await papra_request(
+            "GET",
+            f"/api/organizations/{params.organization_id}/documents/{params.document_id}",
+        )
+        return _json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_search_documents",
+    annotations={
+        "title": "Search Documents",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_search_documents(params: SearchDocsInput) -> str:
+    """Search documents by name or content. Supports advanced search syntax with
+    filters (name:, content:, tag:, created:), logical operators (AND, OR, NOT),
+    and grouping with parentheses.
+    """
+    try:
+        data = await papra_request(
+            "GET",
+            f"/api/organizations/{params.organization_id}/documents/search",
+            params={
+                "searchQuery": params.search_query,
+                "pageIndex": params.page_index,
+                "pageSize": params.page_size,
+            },
+        )
+        return _json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_get_document_statistics",
+    annotations={
+        "title": "Get Document Statistics",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_get_document_statistics(params: OrgId) -> str:
+    """Get statistics (document count and total size) for an organization."""
+    try:
+        data = await papra_request(
+            "GET",
+            f"/api/organizations/{params.organization_id}/documents/statistics",
+        )
+        return _json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_update_document",
+    annotations={
+        "title": "Update Document",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_update_document(params: UpdateDocInput) -> str:
+    """Update a document's name or content (for search indexing). Both fields are optional."""
+    try:
+        body: dict[str, Any] = {}
+        if params.name is not None:
+            body["name"] = params.name
+        if params.content is not None:
+            body["content"] = params.content
+
+        if not body:
+            return "No fields to update."
+
+        data = await papra_request(
+            "PATCH",
+            f"/api/organizations/{params.organization_id}/documents/{params.document_id}",
+            body=body,
+        )
+        return _json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_delete_document",
+    annotations={
+        "title": "Delete Document",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+async def papra_delete_document(params: DocId) -> str:
+    """Soft-delete a document (moves to trash). Permanently deleted after retention period."""
+    try:
+        await papra_request(
+            "DELETE",
+            f"/api/organizations/{params.organization_id}/documents/{params.document_id}",
+        )
+        return f"Document {params.document_id} deleted successfully."
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_get_document_activity",
+    annotations={
+        "title": "Get Document Activity",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_get_document_activity(params: DocActivityInput) -> str:
+    """Get the activity log of a document."""
+    try:
+        data = await papra_request(
+            "GET",
+            f"/api/organizations/{params.organization_id}/documents/{params.document_id}/activity",
+            params={"pageIndex": params.page_index, "pageSize": params.page_size},
+        )
+        return _json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Tags
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(
+    name="papra_list_tags",
+    annotations={
+        "title": "List Tags",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_list_tags(params: OrgId) -> str:
+    """List all tags in an organization."""
+    try:
+        data = await papra_request("GET", f"/api/organizations/{params.organization_id}/tags")
+        return _json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_create_tag",
+    annotations={
+        "title": "Create Tag",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+async def papra_create_tag(params: CreateTagInput) -> str:
+    """Create a new tag in an organization with a name, color, and optional description."""
+    try:
+        body: dict[str, Any] = {"name": params.name, "color": params.color}
+        if params.description is not None:
+            body["description"] = params.description
+
+        data = await papra_request(
+            "POST", f"/api/organizations/{params.organization_id}/tags", body=body
+        )
+        return _json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_update_tag",
+    annotations={
+        "title": "Update Tag",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_update_tag(params: UpdateTagInput) -> str:
+    """Update a tag's name, color, or description. All fields are optional."""
+    try:
+        body: dict[str, Any] = {}
+        if params.name is not None:
+            body["name"] = params.name
+        if params.color is not None:
+            body["color"] = params.color
+        if params.description is not None:
+            body["description"] = params.description
+
+        if not body:
+            return "No fields to update."
+
+        data = await papra_request(
+            "PUT",
+            f"/api/organizations/{params.organization_id}/tags/{params.tag_id}",
+            body=body,
+        )
+        return _json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_delete_tag",
+    annotations={
+        "title": "Delete Tag",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+async def papra_delete_tag(params: TagIdInput) -> str:
+    """Delete a tag by its ID."""
+    try:
+        await papra_request(
+            "DELETE",
+            f"/api/organizations/{params.organization_id}/tags/{params.tag_id}",
+        )
+        return f"Tag {params.tag_id} deleted successfully."
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_add_tag_to_document",
+    annotations={
+        "title": "Add Tag to Document",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_add_tag_to_document(params: DocTagInput) -> str:
+    """Associate a tag with a document."""
+    try:
+        await papra_request(
+            "POST",
+            f"/api/organizations/{params.organization_id}/documents/{params.document_id}/tags",
+            body={"tagId": params.tag_id},
+        )
+        return f"Tag {params.tag_id} added to document {params.document_id} successfully."
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_remove_tag_from_document",
+    annotations={
+        "title": "Remove Tag from Document",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_remove_tag_from_document(params: DocTagInput) -> str:
+    """Remove a tag association from a document."""
+    try:
+        await papra_request(
+            "DELETE",
+            f"/api/organizations/{params.organization_id}/documents/{params.document_id}/tags/{params.tag_id}",
+        )
+        return f"Tag {params.tag_id} removed from document {params.document_id} successfully."
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_apply_tagging_rule",
+    annotations={
+        "title": "Apply Tagging Rule",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+async def papra_apply_tagging_rule(params: ApplyTaggingRuleInput) -> str:
+    """Enqueue a background task to apply a tagging rule to all existing documents.
+    Returns a task ID for tracking.
+    """
+    try:
+        data = await papra_request(
+            "POST",
+            f"/api/organizations/{params.organization_id}/tagging-rules/{params.tagging_rule_id}/apply",
+        )
+        return _json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    mcp.run()
