@@ -14,7 +14,7 @@ An [MCP](https://modelcontextprotocol.io) (Model Context Protocol) server for th
 ## Installation
 
 ```bash
-git clone https://github.com/mwit78/papra-mcp.git
+git clone https://github.com/Rigare/papra-mcp.git
 cd papra-mcp
 pip install -r requirements.txt
 ```
