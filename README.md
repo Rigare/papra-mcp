@@ -115,7 +115,9 @@ mcp dev papra_mcp.py
 
 ## PDF text extraction
 
-When a document has the content type `application/pdf`, the server automatically extracts the text from the PDF using [PyMuPDF](https://pymupdf.readthedocs.io/) and returns it as plain text. This allows LLMs to read, search, and summarize PDF content directly without needing to decode binary data.
+When a document is a PDF, the server automatically extracts the text using [PyMuPDF](https://pymupdf.readthedocs.io/) and returns it as plain text. This allows LLMs to read, search, and summarize PDF content directly without needing to decode binary data.
+
+Detection works in two ways: via the `application/pdf` content type **and** via PDF magic bytes (`%PDF`). The magic-byte fallback ensures extraction works even when the server returns a generic content type like `application/octet-stream`.
 
 If text extraction fails (e.g. scanned documents without OCR, corrupted files, or image-only PDFs), the server falls back to returning the raw content as base64-encoded JSON — the same format used for other binary types like images or archives.
 
