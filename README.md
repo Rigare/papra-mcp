@@ -69,7 +69,7 @@ Use the MCP inspector to test tools interactively:
 mcp dev papra_mcp.py
 ```
 
-## Tools (21)
+## Tools (22)
 
 ### API Key
 
@@ -94,6 +94,7 @@ mcp dev papra_mcp.py
 | `papra_list_documents` | List documents with pagination and optional search |
 | `papra_list_deleted_documents` | List deleted documents (trash) |
 | `papra_get_document` | Get a document's metadata |
+| `papra_get_document_content` | Get the file content of a document (text returned directly, binary as base64) |
 | `papra_search_documents` | Search documents (supports `name:`, `content:`, `tag:`, `created:`, `AND`, `OR`, `NOT`) |
 | `papra_get_document_statistics` | Get document count and total size for an organization |
 | `papra_update_document` | Update a document's name or content |

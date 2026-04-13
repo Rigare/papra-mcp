@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Papra MCP Server — MCP server for the Papra document management API."""
 
+import base64
 import json
 import os
 from contextlib import asynccontextmanager
@@ -72,6 +73,34 @@ async def papra_request(
     if response.status_code == 204:
         return {}
     return response.json()
+
+
+async def papra_file_request(path: str) -> httpx.Response:
+    """Make an authenticated GET request and return the raw response (for file downloads)."""
+    if _client is None:
+        raise RuntimeError("HTTP client not initialized — server lifespan not started.")
+
+    response = await _client.request("GET", path)
+    response.raise_for_status()
+    return response
+
+
+_TEXT_CONTENT_TYPES = frozenset({
+    "text/plain",
+    "text/html",
+    "text/csv",
+    "text/xml",
+    "text/markdown",
+    "application/json",
+    "application/xml",
+    "application/xhtml+xml",
+})
+
+
+def _is_text_content(content_type: str) -> bool:
+    """Check whether the content type represents text that can be returned directly."""
+    media_type = content_type.split(";")[0].strip().lower()
+    return media_type in _TEXT_CONTENT_TYPES or media_type.startswith("text/")
 
 
 def format_error(exc: Exception) -> str:
@@ -392,6 +421,43 @@ async def papra_get_document(params: DocId) -> str:
             f"/api/organizations/{params.organization_id}/documents/{params.document_id}",
         )
         return _json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_get_document_content",
+    annotations={
+        "title": "Get Document Content",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_get_document_content(params: DocId) -> str:
+    """Get the file content of a document by its ID.
+
+    For text-based documents (plain text, HTML, CSV, JSON, XML, Markdown, etc.)
+    the content is returned directly as text. For binary documents (PDF, images,
+    etc.) the content is returned as a base64-encoded string together with the
+    content type so the caller can decode it.
+    """
+    try:
+        response = await papra_file_request(
+            f"/api/organizations/{params.organization_id}/documents/{params.document_id}/file",
+        )
+        content_type = response.headers.get("content-type", "application/octet-stream")
+
+        if _is_text_content(content_type):
+            return response.text
+
+        encoded = base64.b64encode(response.content).decode("ascii")
+        return _json({
+            "content_type": content_type,
+            "encoding": "base64",
+            "data": encoded,
+        })
     except Exception as exc:
         return format_error(exc)
 
