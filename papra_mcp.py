@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
+import pymupdf
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
@@ -101,6 +102,27 @@ def _is_text_content(content_type: str) -> bool:
     """Check whether the content type represents text that can be returned directly."""
     media_type = content_type.split(";")[0].strip().lower()
     return media_type in _TEXT_CONTENT_TYPES or media_type.startswith("text/")
+
+
+def _extract_pdf_text(data: bytes) -> str | None:
+    """Extract text content from PDF bytes using pymupdf.
+
+    Returns the extracted text or ``None`` if no text could be extracted
+    (e.g. scanned images without OCR).
+    """
+    try:
+        doc = pymupdf.open(stream=data, filetype="pdf")
+        pages: list[str] = []
+        for page in doc:
+            text = page.get_text()
+            if text.strip():
+                pages.append(text)
+        doc.close()
+        if pages:
+            return "\n\n".join(pages)
+    except Exception:
+        pass
+    return None
 
 
 def format_error(exc: Exception) -> str:
@@ -439,9 +461,11 @@ async def papra_get_document_content(params: DocId) -> str:
     """Get the file content of a document by its ID.
 
     For text-based documents (plain text, HTML, CSV, JSON, XML, Markdown, etc.)
-    the content is returned directly as text. For binary documents (PDF, images,
-    etc.) the content is returned as a base64-encoded string together with the
-    content type so the caller can decode it.
+    the content is returned directly as text. For PDF documents the text is
+    extracted and returned as plain text so that LLMs can process it directly.
+    For other binary documents (images, archives, etc.) the content is returned
+    as a base64-encoded string together with the content type so the caller can
+    decode it.
     """
     try:
         response = await papra_file_request(
@@ -451,6 +475,12 @@ async def papra_get_document_content(params: DocId) -> str:
 
         if _is_text_content(content_type):
             return response.text
+
+        media_type = content_type.split(";")[0].strip().lower()
+        if media_type == "application/pdf":
+            text = _extract_pdf_text(response.content)
+            if text is not None:
+                return text
 
         encoded = base64.b64encode(response.content).decode("ascii")
         return _json({
