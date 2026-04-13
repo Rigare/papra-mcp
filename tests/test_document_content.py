@@ -95,6 +95,31 @@ class TestIsTextContent:
 
 
 # ---------------------------------------------------------------------------
+# _looks_like_pdf helper tests
+# ---------------------------------------------------------------------------
+
+
+class TestLooksLikePdf:
+    """Tests for the _looks_like_pdf helper function."""
+
+    def test_valid_pdf_bytes(self):
+        pdf_bytes = _make_pdf_bytes("test")
+        assert papra_mcp._looks_like_pdf(pdf_bytes) is True
+
+    def test_raw_pdf_header(self):
+        assert papra_mcp._looks_like_pdf(b"%PDF-1.4 ...") is True
+
+    def test_non_pdf_bytes(self):
+        assert papra_mcp._looks_like_pdf(b"\x89PNG\r\n\x1a\n") is False
+
+    def test_empty_bytes(self):
+        assert papra_mcp._looks_like_pdf(b"") is False
+
+    def test_short_bytes(self):
+        assert papra_mcp._looks_like_pdf(b"%PD") is False
+
+
+# ---------------------------------------------------------------------------
 # _extract_pdf_text helper tests
 # ---------------------------------------------------------------------------
 
@@ -291,6 +316,20 @@ class TestGetDocumentContentPdf:
 
         assert "Page one content." in result
         assert "Page two content." in result
+
+    @pytest.mark.asyncio
+    async def test_pdf_detected_by_magic_bytes(self, doc_params):
+        """A PDF served as application/octet-stream should still be extracted via magic bytes."""
+        pdf_bytes = _make_pdf_bytes("Invoice total: 42.00 EUR")
+        response = _make_response(pdf_bytes, "application/octet-stream")
+
+        with patch.object(papra_mcp, "papra_file_request", new_callable=AsyncMock, return_value=response):
+            result = await papra_mcp.papra_get_document_content(doc_params)
+
+        assert "Invoice total: 42.00 EUR" in result
+        # Should NOT be base64-encoded JSON
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(result)
 
 
 class TestGetDocumentContentBinary:

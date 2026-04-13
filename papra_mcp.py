@@ -104,6 +104,11 @@ def _is_text_content(content_type: str) -> bool:
     return media_type in _TEXT_CONTENT_TYPES or media_type.startswith("text/")
 
 
+def _looks_like_pdf(data: bytes) -> bool:
+    """Return True if *data* starts with the PDF magic bytes (``%PDF``)."""
+    return data[:4] == b"%PDF"
+
+
 def _extract_pdf_text(data: bytes) -> str | None:
     """Extract text content from PDF bytes using pymupdf.
 
@@ -477,7 +482,7 @@ async def papra_get_document_content(params: DocId) -> str:
             return response.text
 
         media_type = content_type.split(";")[0].strip().lower()
-        if media_type == "application/pdf":
+        if media_type == "application/pdf" or _looks_like_pdf(response.content):
             text = _extract_pdf_text(response.content)
             if text is not None:
                 return text
