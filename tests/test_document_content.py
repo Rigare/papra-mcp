@@ -2,6 +2,7 @@
 
 Verifies that papra_get_document_content correctly handles:
 - Text content types (returned as plain text)
+- PDF documents (text extracted via pymupdf)
 - Binary content types (returned as base64-encoded JSON)
 - Error scenarios (HTTP errors, network failures)
 - The _is_text_content helper
@@ -12,10 +13,21 @@ import json
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pymupdf
 import pytest
 
 # Import the module under test
 import papra_mcp
+
+
+def _make_pdf_bytes(text: str) -> bytes:
+    """Create a minimal valid PDF containing the given text."""
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), text)
+    pdf_bytes = doc.tobytes()
+    doc.close()
+    return pdf_bytes
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +92,50 @@ class TestIsTextContent:
 
     def test_empty_string(self):
         assert papra_mcp._is_text_content("") is False
+
+
+# ---------------------------------------------------------------------------
+# _extract_pdf_text helper tests
+# ---------------------------------------------------------------------------
+
+
+class TestExtractPdfText:
+    """Tests for the _extract_pdf_text helper function."""
+
+    def test_extracts_text_from_valid_pdf(self):
+        pdf_bytes = _make_pdf_bytes("Hello from PDF")
+        result = papra_mcp._extract_pdf_text(pdf_bytes)
+        assert result is not None
+        assert "Hello from PDF" in result
+
+    def test_returns_none_for_empty_pdf(self):
+        """A PDF with no text should return None."""
+        doc = pymupdf.open()
+        doc.new_page()
+        pdf_bytes = doc.tobytes()
+        doc.close()
+        assert papra_mcp._extract_pdf_text(pdf_bytes) is None
+
+    def test_returns_none_for_corrupt_data(self):
+        """Non-PDF binary data should return None, not raise."""
+        assert papra_mcp._extract_pdf_text(b"not a pdf") is None
+
+    def test_returns_none_for_empty_bytes(self):
+        assert papra_mcp._extract_pdf_text(b"") is None
+
+    def test_multi_page_extraction(self):
+        doc = pymupdf.open()
+        page1 = doc.new_page()
+        page1.insert_text((72, 72), "First page")
+        page2 = doc.new_page()
+        page2.insert_text((72, 72), "Second page")
+        pdf_bytes = doc.tobytes()
+        doc.close()
+
+        result = papra_mcp._extract_pdf_text(pdf_bytes)
+        assert result is not None
+        assert "First page" in result
+        assert "Second page" in result
 
 
 # ---------------------------------------------------------------------------
@@ -170,11 +226,43 @@ class TestGetDocumentContentText:
         assert result == xml
 
 
-class TestGetDocumentContentBinary:
-    """Binary documents should be returned as base64-encoded JSON."""
+class TestGetDocumentContentPdf:
+    """PDF documents should have their text extracted and returned as plain text."""
 
     @pytest.mark.asyncio
-    async def test_pdf_content(self, doc_params):
+    async def test_pdf_text_extraction(self, doc_params):
+        """A valid PDF with text content should return the extracted text."""
+        pdf_bytes = _make_pdf_bytes("Hello, this is a test PDF document.")
+        response = _make_response(pdf_bytes, "application/pdf")
+
+        with patch.object(papra_mcp, "papra_file_request", new_callable=AsyncMock, return_value=response):
+            result = await papra_mcp.papra_get_document_content(doc_params)
+
+        assert "Hello, this is a test PDF document." in result
+        # Should NOT be base64-encoded JSON
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(result)
+
+    @pytest.mark.asyncio
+    async def test_pdf_fallback_when_no_text(self, doc_params):
+        """A PDF with no extractable text should fall back to base64."""
+        # Create a PDF with only an image (no text) — use an empty page
+        doc = pymupdf.open()
+        doc.new_page()
+        pdf_bytes = doc.tobytes()
+        doc.close()
+        response = _make_response(pdf_bytes, "application/pdf")
+
+        with patch.object(papra_mcp, "papra_file_request", new_callable=AsyncMock, return_value=response):
+            result = await papra_mcp.papra_get_document_content(doc_params)
+
+        parsed = json.loads(result)
+        assert parsed["content_type"] == "application/pdf"
+        assert parsed["encoding"] == "base64"
+
+    @pytest.mark.asyncio
+    async def test_pdf_fallback_on_corrupt_data(self, doc_params):
+        """Corrupt PDF data should fall back to base64 instead of crashing."""
         pdf_bytes = b"%PDF-1.4 fake pdf content here"
         response = _make_response(pdf_bytes, "application/pdf")
 
@@ -185,6 +273,28 @@ class TestGetDocumentContentBinary:
         assert parsed["content_type"] == "application/pdf"
         assert parsed["encoding"] == "base64"
         assert base64.b64decode(parsed["data"]) == pdf_bytes
+
+    @pytest.mark.asyncio
+    async def test_pdf_multi_page(self, doc_params):
+        """Text from multiple pages should be extracted and joined."""
+        doc = pymupdf.open()
+        page1 = doc.new_page()
+        page1.insert_text((72, 72), "Page one content.")
+        page2 = doc.new_page()
+        page2.insert_text((72, 72), "Page two content.")
+        pdf_bytes = doc.tobytes()
+        doc.close()
+        response = _make_response(pdf_bytes, "application/pdf")
+
+        with patch.object(papra_mcp, "papra_file_request", new_callable=AsyncMock, return_value=response):
+            result = await papra_mcp.papra_get_document_content(doc_params)
+
+        assert "Page one content." in result
+        assert "Page two content." in result
+
+
+class TestGetDocumentContentBinary:
+    """Binary documents should be returned as base64-encoded JSON."""
 
     @pytest.mark.asyncio
     async def test_png_image(self, doc_params):

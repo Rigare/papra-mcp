@@ -94,7 +94,7 @@ mcp dev papra_mcp.py
 | `papra_list_documents` | List documents with pagination and optional search |
 | `papra_list_deleted_documents` | List deleted documents (trash) |
 | `papra_get_document` | Get a document's metadata |
-| `papra_get_document_content` | Get the file content of a document (text returned directly, binary as base64) |
+| `papra_get_document_content` | Get the file content of a document (text returned directly, PDFs extracted as plain text, other binary as base64) |
 | `papra_search_documents` | Search documents (supports `name:`, `content:`, `tag:`, `created:`, `AND`, `OR`, `NOT`) |
 | `papra_get_document_statistics` | Get document count and total size for an organization |
 | `papra_update_document` | Update a document's name or content |
@@ -112,6 +112,12 @@ mcp dev papra_mcp.py
 | `papra_add_tag_to_document` | Associate a tag with a document |
 | `papra_remove_tag_from_document` | Remove a tag from a document |
 | `papra_apply_tagging_rule` | Apply a tagging rule to all existing documents (background task) |
+
+## PDF text extraction
+
+When a document has the content type `application/pdf`, the server automatically extracts the text from the PDF using [PyMuPDF](https://pymupdf.readthedocs.io/) and returns it as plain text. This allows LLMs to read, search, and summarize PDF content directly without needing to decode binary data.
+
+If text extraction fails (e.g. scanned documents without OCR, corrupted files, or image-only PDFs), the server falls back to returning the raw content as base64-encoded JSON — the same format used for other binary types like images or archives.
 
 ## License
 
