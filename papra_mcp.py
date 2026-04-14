@@ -804,5 +804,11 @@ async def papra_apply_tagging_rule(params: ApplyTaggingRuleInput) -> str:
 # Entry point
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+
+def main():
+    """Run the Papra MCP server."""
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()
