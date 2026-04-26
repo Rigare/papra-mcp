@@ -4,5 +4,6 @@
 # Python cache
 __pycache__/
 
-# Claude Code
+# Claude / editor local settings
+.claude/
 CLAUDE.md
