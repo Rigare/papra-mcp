@@ -3,14 +3,20 @@
 
 import base64
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import pymupdf
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger("papra_mcp")
+
+__all__ = ["main", "mcp"]
 
 # ---------------------------------------------------------------------------
 # HTTP client
@@ -30,6 +36,12 @@ async def lifespan(_server):
         raise RuntimeError(
             "PAPRA_BASE_URL environment variable is required. "
             "Set it to your Papra instance URL (e.g. https://papra.example.com)"
+        )
+    parsed = urlparse(base_url)
+    if not parsed.scheme or not parsed.netloc:
+        raise RuntimeError(
+            f"PAPRA_BASE_URL is not a valid URL: {base_url!r}. "
+            "It must include a scheme (http:// or https://) and a host."
         )
     if not api_key:
         raise RuntimeError(
@@ -116,18 +128,12 @@ def _extract_pdf_text(data: bytes) -> str | None:
     (e.g. scanned images without OCR).
     """
     try:
-        doc = pymupdf.open(stream=data, filetype="pdf")
-        pages: list[str] = []
-        for page in doc:
-            text = page.get_text()
-            if text.strip():
-                pages.append(text)
-        doc.close()
-        if pages:
-            return "\n\n".join(pages)
+        with pymupdf.open(stream=data, filetype="pdf") as doc:
+            pages = [text for page in doc if (text := page.get_text().strip())]
+            return "\n\n".join(pages) if pages else None
     except Exception:
-        pass
-    return None
+        logger.debug("PDF text extraction failed", exc_info=True)
+        return None
 
 
 def format_error(exc: Exception) -> str:
@@ -144,7 +150,7 @@ def format_error(exc: Exception) -> str:
     return f"Error: {exc}"
 
 
-def _json(data: Any) -> str:
+def _pretty_json(data: Any) -> str:
     return json.dumps(data, indent=2, ensure_ascii=False)
 
 
@@ -264,7 +270,7 @@ async def papra_check_api_key() -> str:
     """Check the currently used API key. Returns the key's ID, name, and permissions."""
     try:
         data = await papra_request("GET", "/api/api-keys/current")
-        return _json(data)
+        return _pretty_json(data)
     except Exception as exc:
         return format_error(exc)
 
@@ -288,7 +294,7 @@ async def papra_list_organizations() -> str:
     """List all organizations accessible to the authenticated user."""
     try:
         data = await papra_request("GET", "/api/organizations")
-        return _json(data)
+        return _pretty_json(data)
     except Exception as exc:
         return format_error(exc)
 
@@ -307,7 +313,7 @@ async def papra_get_organization(params: OrgId) -> str:
     """Get details of a specific organization by its ID."""
     try:
         data = await papra_request("GET", f"/api/organizations/{params.organization_id}")
-        return _json(data)
+        return _pretty_json(data)
     except Exception as exc:
         return format_error(exc)
 
@@ -326,7 +332,7 @@ async def papra_create_organization(params: CreateOrgInput) -> str:
     """Create a new organization. The name must be 3-50 characters."""
     try:
         data = await papra_request("POST", "/api/organizations", body={"name": params.name})
-        return _json(data)
+        return _pretty_json(data)
     except Exception as exc:
         return format_error(exc)
 
@@ -347,7 +353,7 @@ async def papra_update_organization(params: OrgName) -> str:
         data = await papra_request(
             "PUT", f"/api/organizations/{params.organization_id}", body={"name": params.name}
         )
-        return _json(data)
+        return _pretty_json(data)
     except Exception as exc:
         return format_error(exc)
 
@@ -402,7 +408,7 @@ async def papra_list_documents(params: ListDocsInput) -> str:
                 "searchQuery": params.search_query,
             },
         )
-        return _json(data)
+        return _pretty_json(data)
     except Exception as exc:
         return format_error(exc)
 
@@ -425,7 +431,7 @@ async def papra_list_deleted_documents(params: PaginatedOrgInput) -> str:
             f"/api/organizations/{params.organization_id}/documents/deleted",
             params={"pageIndex": params.page_index, "pageSize": params.page_size},
         )
-        return _json(data)
+        return _pretty_json(data)
     except Exception as exc:
         return format_error(exc)
 
@@ -447,7 +453,7 @@ async def papra_get_document(params: DocId) -> str:
             "GET",
             f"/api/organizations/{params.organization_id}/documents/{params.document_id}",
         )
-        return _json(data)
+        return _pretty_json(data)
     except Exception as exc:
         return format_error(exc)
 
@@ -479,7 +485,10 @@ async def papra_get_document_content(params: DocId) -> str:
         content_type = response.headers.get("content-type", "application/octet-stream")
 
         if _is_text_content(content_type):
-            return response.text
+            try:
+                return response.text
+            except UnicodeDecodeError:
+                pass  # Fall through to base64 fallback
 
         media_type = content_type.split(";")[0].strip().lower()
         if media_type == "application/pdf" or _looks_like_pdf(response.content):
@@ -488,7 +497,7 @@ async def papra_get_document_content(params: DocId) -> str:
                 return text
 
         encoded = base64.b64encode(response.content).decode("ascii")
-        return _json({
+        return _pretty_json({
             "content_type": content_type,
             "encoding": "base64",
             "data": encoded,
@@ -522,7 +531,7 @@ async def papra_search_documents(params: SearchDocsInput) -> str:
                 "pageSize": params.page_size,
             },
         )
-        return _json(data)
+        return _pretty_json(data)
     except Exception as exc:
         return format_error(exc)
 
@@ -544,7 +553,7 @@ async def papra_get_document_statistics(params: OrgId) -> str:
             "GET",
             f"/api/organizations/{params.organization_id}/documents/statistics",
         )
-        return _json(data)
+        return _pretty_json(data)
     except Exception as exc:
         return format_error(exc)
 
@@ -576,7 +585,7 @@ async def papra_update_document(params: UpdateDocInput) -> str:
             f"/api/organizations/{params.organization_id}/documents/{params.document_id}",
             body=body,
         )
-        return _json(data)
+        return _pretty_json(data)
     except Exception as exc:
         return format_error(exc)
 
@@ -621,7 +630,7 @@ async def papra_get_document_activity(params: DocActivityInput) -> str:
             f"/api/organizations/{params.organization_id}/documents/{params.document_id}/activity",
             params={"pageIndex": params.page_index, "pageSize": params.page_size},
         )
-        return _json(data)
+        return _pretty_json(data)
     except Exception as exc:
         return format_error(exc)
 
@@ -645,7 +654,7 @@ async def papra_list_tags(params: OrgId) -> str:
     """List all tags in an organization."""
     try:
         data = await papra_request("GET", f"/api/organizations/{params.organization_id}/tags")
-        return _json(data)
+        return _pretty_json(data)
     except Exception as exc:
         return format_error(exc)
 
@@ -670,7 +679,7 @@ async def papra_create_tag(params: CreateTagInput) -> str:
         data = await papra_request(
             "POST", f"/api/organizations/{params.organization_id}/tags", body=body
         )
-        return _json(data)
+        return _pretty_json(data)
     except Exception as exc:
         return format_error(exc)
 
@@ -704,7 +713,7 @@ async def papra_update_tag(params: UpdateTagInput) -> str:
             f"/api/organizations/{params.organization_id}/tags/{params.tag_id}",
             body=body,
         )
-        return _json(data)
+        return _pretty_json(data)
     except Exception as exc:
         return format_error(exc)
 
@@ -795,7 +804,7 @@ async def papra_apply_tagging_rule(params: ApplyTaggingRuleInput) -> str:
             "POST",
             f"/api/organizations/{params.organization_id}/tagging-rules/{params.tagging_rule_id}/apply",
         )
-        return _json(data)
+        return _pretty_json(data)
     except Exception as exc:
         return format_error(exc)
 
@@ -805,7 +814,7 @@ async def papra_apply_tagging_rule(params: ApplyTaggingRuleInput) -> str:
 # ---------------------------------------------------------------------------
 
 
-def main():
+def main() -> None:
     """Run the Papra MCP server."""
     mcp.run()
 

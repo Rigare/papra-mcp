@@ -10,7 +10,8 @@ Verifies that papra_get_document_content correctly handles:
 
 import base64
 import json
-from unittest.mock import AsyncMock, patch
+import os
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pymupdf
@@ -528,16 +529,19 @@ class TestGetDocumentContentEdgeCases:
 class TestPapraFileRequest:
     """Tests for the file request helper."""
 
+    @pytest.fixture(autouse=True)
+    def _reset_client(self):
+        """Restore the global client after each test."""
+        original = papra_mcp._client
+        yield
+        papra_mcp._client = original
+
     @pytest.mark.asyncio
     async def test_client_not_initialized(self):
         """Should raise RuntimeError when client is None."""
-        original = papra_mcp._client
         papra_mcp._client = None
-        try:
-            with pytest.raises(RuntimeError, match="HTTP client not initialized"):
-                await papra_mcp.papra_file_request("/some/path")
-        finally:
-            papra_mcp._client = original
+        with pytest.raises(RuntimeError, match="HTTP client not initialized"):
+            await papra_mcp.papra_file_request("/some/path")
 
 
 # ---------------------------------------------------------------------------
@@ -575,3 +579,281 @@ class TestFormatError:
         exc = ValueError("something went wrong")
         result = papra_mcp.format_error(exc)
         assert "something went wrong" in result
+
+
+# ---------------------------------------------------------------------------
+# lifespan tests
+# ---------------------------------------------------------------------------
+
+
+class TestLifespan:
+    """Tests for the server lifespan and configuration validation."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_env(self):
+        """Restore environment variables after each test."""
+        original_base = os.environ.get("PAPRA_BASE_URL")
+        original_key = os.environ.get("PAPRA_API_KEY")
+        yield
+        if original_base is not None:
+            os.environ["PAPRA_BASE_URL"] = original_base
+        else:
+            os.environ.pop("PAPRA_BASE_URL", None)
+        if original_key is not None:
+            os.environ["PAPRA_API_KEY"] = original_key
+        else:
+            os.environ.pop("PAPRA_API_KEY", None)
+
+    @pytest.mark.asyncio
+    async def test_missing_base_url(self):
+        os.environ.pop("PAPRA_BASE_URL", None)
+        os.environ["PAPRA_API_KEY"] = "test-key"
+        with pytest.raises(RuntimeError, match="PAPRA_BASE_URL"):
+            async with papra_mcp.lifespan(None):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_missing_api_key(self):
+        os.environ["PAPRA_BASE_URL"] = "https://papra.example.com"
+        os.environ.pop("PAPRA_API_KEY", None)
+        with pytest.raises(RuntimeError, match="PAPRA_API_KEY"):
+            async with papra_mcp.lifespan(None):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_invalid_base_url_no_scheme(self):
+        os.environ["PAPRA_BASE_URL"] = "papra.example.com"
+        os.environ["PAPRA_API_KEY"] = "test-key"
+        with pytest.raises(RuntimeError, match="not a valid URL"):
+            async with papra_mcp.lifespan(None):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_invalid_base_url_no_host(self):
+        os.environ["PAPRA_BASE_URL"] = "https://"
+        os.environ["PAPRA_API_KEY"] = "test-key"
+        with pytest.raises(RuntimeError, match="not a valid URL"):
+            async with papra_mcp.lifespan(None):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_valid_config_creates_client(self):
+        os.environ["PAPRA_BASE_URL"] = "https://papra.example.com"
+        os.environ["PAPRA_API_KEY"] = "test-key"
+        async with papra_mcp.lifespan(None):
+            assert papra_mcp._client is not None
+            assert str(papra_mcp._client.base_url) == "https://papra.example.com"
+
+
+# ---------------------------------------------------------------------------
+# papra_request tests
+# ---------------------------------------------------------------------------
+
+
+class TestPapraRequest:
+    """Tests for the generic API request helper."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_client(self):
+        """Restore the global client after each test."""
+        original = papra_mcp._client
+        yield
+        papra_mcp._client = original
+
+    @pytest.mark.asyncio
+    async def test_client_not_initialized(self):
+        papra_mcp._client = None
+        with pytest.raises(RuntimeError, match="HTTP client not initialized"):
+            await papra_mcp.papra_request("GET", "/api/organizations")
+
+    @pytest.mark.asyncio
+    async def test_strips_none_params(self):
+        """Ensure None values are removed from query params."""
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"ok": True}
+        mock_client.request.return_value = mock_response
+        papra_mcp._client = mock_client
+
+        await papra_mcp.papra_request(
+            "GET", "/api/organizations", params={"pageIndex": 0, "searchQuery": None}
+        )
+
+        call_kwargs = mock_client.request.call_args.kwargs
+        assert call_kwargs["params"] == {"pageIndex": 0}
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_dict_on_204(self):
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 204
+        mock_response.json.return_value = {}
+        mock_client.request.return_value = mock_response
+        papra_mcp._client = mock_client
+
+        result = await papra_mcp.papra_request("DELETE", "/api/organizations/123")
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_returns_json_on_success(self):
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"id": "org-1", "name": "Test Org"}
+        mock_client.request.return_value = mock_response
+        papra_mcp._client = mock_client
+
+        result = await papra_mcp.papra_request("GET", "/api/organizations/org-1")
+        assert result == {"id": "org-1", "name": "Test Org"}
+
+
+# ---------------------------------------------------------------------------
+# Tool integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestOrganizationTools:
+    """Smoke tests for organization tools."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_client(self):
+        original = papra_mcp._client
+        yield
+        papra_mcp._client = original
+
+    @pytest.mark.asyncio
+    async def test_list_organizations(self):
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = [{"id": "org-1", "name": "Acme"}]
+        mock_client.request.return_value = mock_response
+        papra_mcp._client = mock_client
+
+        result = await papra_mcp.papra_list_organizations()
+        assert "Acme" in result
+
+    @pytest.mark.asyncio
+    async def test_create_organization(self):
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 201
+        mock_response.json.return_value = {"id": "org-new", "name": "New Org"}
+        mock_client.request.return_value = mock_response
+        papra_mcp._client = mock_client
+
+        result = await papra_mcp.papra_create_organization(
+            papra_mcp.CreateOrgInput(name="New Org")
+        )
+        assert "New Org" in result
+        mock_client.request.assert_awaited_once_with(
+            "POST", "/api/organizations", json={"name": "New Org"}, params=None
+        )
+
+    @pytest.mark.asyncio
+    async def test_delete_organization(self):
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 204
+        mock_response.json.return_value = {}
+        mock_client.request.return_value = mock_response
+        papra_mcp._client = mock_client
+
+        result = await papra_mcp.papra_delete_organization(
+            papra_mcp.OrgId(organization_id="org-1")
+        )
+        assert "org-1" in result
+        assert "deleted" in result
+
+    @pytest.mark.asyncio
+    async def test_error_formatting_propagated(self):
+        """Errors from tools should be formatted, not raised."""
+        with patch.object(
+            papra_mcp,
+            "papra_request",
+            new_callable=AsyncMock,
+            side_effect=httpx.ConnectError("Connection refused"),
+        ):
+            result = await papra_mcp.papra_list_organizations()
+        assert "Error" in result
+        assert "Connection refused" in result
+
+
+class TestDocumentTools:
+    """Smoke tests for document tools beyond content retrieval."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_client(self):
+        original = papra_mcp._client
+        yield
+        papra_mcp._client = original
+
+    @pytest.mark.asyncio
+    async def test_get_document(self):
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"id": "doc-1", "name": "Report.pdf"}
+        mock_client.request.return_value = mock_response
+        papra_mcp._client = mock_client
+
+        result = await papra_mcp.papra_get_document(
+            papra_mcp.DocId(organization_id="org-1", document_id="doc-1")
+        )
+        assert "Report.pdf" in result
+
+    @pytest.mark.asyncio
+    async def test_delete_document(self):
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 204
+        mock_response.json.return_value = {}
+        mock_client.request.return_value = mock_response
+        papra_mcp._client = mock_client
+
+        result = await papra_mcp.papra_delete_document(
+            papra_mcp.DocId(organization_id="org-1", document_id="doc-1")
+        )
+        assert "doc-1" in result
+        assert "deleted" in result
+
+    @pytest.mark.asyncio
+    async def test_update_document_no_fields(self):
+        """Updating with no fields should return a friendly message."""
+        result = await papra_mcp.papra_update_document(
+            papra_mcp.UpdateDocInput(organization_id="org-1", document_id="doc-1")
+        )
+        assert result == "No fields to update."
+
+
+class TestTagTools:
+    """Smoke tests for tag tools."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_client(self):
+        original = papra_mcp._client
+        yield
+        papra_mcp._client = original
+
+    @pytest.mark.asyncio
+    async def test_list_tags(self):
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = [{"id": "tag-1", "name": "Important"}]
+        mock_client.request.return_value = mock_response
+        papra_mcp._client = mock_client
+
+        result = await papra_mcp.papra_list_tags(
+            papra_mcp.OrgId(organization_id="org-1")
+        )
+        assert "Important" in result
+
+    @pytest.mark.asyncio
+    async def test_update_tag_no_fields(self):
+        """Updating a tag with no fields should return a friendly message."""
+        result = await papra_mcp.papra_update_tag(
+            papra_mcp.UpdateTagInput(organization_id="org-1", tag_id="tag-1")
+        )
+        assert result == "No fields to update."

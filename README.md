@@ -28,7 +28,7 @@ The server requires two environment variables:
 | `PAPRA_BASE_URL` | Your Papra instance URL (e.g. `https://papra.example.com`) |
 | `PAPRA_API_KEY` | API key from your Papra account settings |
 
-Both are validated at startup. The server will exit with a clear error if either is missing.
+Both are validated at startup. The server exits with a clear error if either is missing or if `PAPRA_BASE_URL` is not a well-formed URL (missing scheme or host).
 
 ## Usage
 
