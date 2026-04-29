@@ -218,6 +218,11 @@ class UpdateDocInput(DocBase):
     content: str | None = Field(default=None, description="New document content (for search)")
 
 
+class CreateDocInput(OrgBase):
+    file_content: str = Field(..., description="Base64-encoded file content or text to upload")
+    ocr_languages: str | None = Field(default=None, description="OCR languages to use (e.g., 'eng', 'fra', 'deu')")
+
+
 class DocActivityInput(DocBase):
     page_index: int = Field(default=0, ge=0)
     page_size: int = Field(default=100, ge=1, le=100)
@@ -432,6 +437,44 @@ async def papra_list_deleted_documents(params: PaginatedOrgInput) -> str:
             params={"pageIndex": params.page_index, "pageSize": params.page_size},
         )
         return _pretty_json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_create_document",
+    annotations={
+        "title": "Create Document",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+async def papra_create_document(params: CreateDocInput) -> str:
+    """Create a new document in an organization by uploading a file.
+
+    The file_content parameter must be base64-encoded file content.
+    The ocr_languages parameter is optional and specifies the languages
+    to use for OCR (e.g. 'eng', 'fra', 'deu').
+    """
+    try:
+        file_bytes = base64.b64decode(params.file_content)
+        files = {"file": ("upload", file_bytes)}
+        data = {"ocrLanguages": params.ocr_languages} if params.ocr_languages else None
+
+        response = await _client.request(
+            "POST",
+            f"/api/organizations/{params.organization_id}/documents",
+            files=files,
+            data=data,
+        )
+        response.raise_for_status()
+
+        if response.status_code == 204:
+            return "Document created successfully."
+
+        return _pretty_json(response.json())
     except Exception as exc:
         return format_error(exc)
 
