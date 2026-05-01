@@ -4,6 +4,9 @@
 # Python cache
 __pycache__/
 
+# Build artifacts
+dist/
+
 # Claude / editor local settings
 .claude/
 CLAUDE.md
