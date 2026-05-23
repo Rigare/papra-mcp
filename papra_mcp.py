@@ -6,7 +6,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import httpx
@@ -204,6 +204,14 @@ class ListDocsInput(PaginatedOrgBase):
         default=None,
         description="Optional search query. Supports filters: name:, content:, tag:, created: and operators AND, OR, NOT",
     )
+    sort_field: Literal["createdAt", "updatedAt", "name", "documentDate"] | None = Field(
+        default=None,
+        description="Field to sort by: createdAt, updatedAt, name, or documentDate",
+    )
+    sort_order: Literal["asc", "desc"] | None = Field(
+        default=None,
+        description="Sort direction: asc or desc",
+    )
 
 
 PaginatedOrgInput = PaginatedOrgBase
@@ -256,6 +264,55 @@ class ApplyTaggingRuleInput(OrgBase):
     tagging_rule_id: str = Field(..., description="The tagging rule ID", min_length=1)
 
 
+# -- Member / invitation models --
+
+OrgRole = Literal["member", "admin", "owner"]
+
+
+class MemberIdInput(OrgBase):
+    member_id: str = Field(..., description="The organization member ID", min_length=1)
+
+
+class UpdateMemberRoleInput(MemberIdInput):
+    role: OrgRole = Field(..., description="New role: member, admin, or owner")
+
+
+class CreateInvitationInput(OrgBase):
+    email: str = Field(..., description="Email address of the user to invite")
+    role: OrgRole = Field(..., description="Role to assign on acceptance: member, admin, or owner")
+
+
+# -- API Key models --
+
+ApiKeyPermission = Literal[
+    "organizations:create",
+    "organizations:read",
+    "organizations:update",
+    "organizations:delete",
+    "documents:create",
+    "documents:read",
+    "documents:update",
+    "documents:delete",
+    "tags:create",
+    "tags:read",
+    "tags:update",
+    "tags:delete",
+]
+
+
+class CreateApiKeyInput(BaseModel):
+    name: str = Field(..., description="API key name", min_length=1)
+    permissions: list[ApiKeyPermission] = Field(
+        ...,
+        description="Permissions granted to this key (at least one required)",
+        min_length=1,
+    )
+
+
+class ApiKeyIdInput(BaseModel):
+    api_key_id: str = Field(..., description="The API key ID", min_length=1)
+
+
 # ---------------------------------------------------------------------------
 # API Key
 # ---------------------------------------------------------------------------
@@ -276,6 +333,71 @@ async def papra_check_api_key() -> str:
     try:
         data = await papra_request("GET", "/api/api-keys/current")
         return _pretty_json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_list_api_keys",
+    annotations={
+        "title": "List API Keys",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_list_api_keys() -> str:
+    """List all API keys belonging to the authenticated user."""
+    try:
+        data = await papra_request("GET", "/api/api-keys")
+        return _pretty_json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_create_api_key",
+    annotations={
+        "title": "Create API Key",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+async def papra_create_api_key(params: CreateApiKeyInput) -> str:
+    """Create a new API key with the given name and permissions.
+
+    Valid permissions are combinations of resource (organizations, documents, tags)
+    and action (create, read, update, delete), e.g. 'documents:read'.
+    """
+    try:
+        data = await papra_request(
+            "POST",
+            "/api/api-keys",
+            body={"name": params.name, "permissions": params.permissions},
+        )
+        return _pretty_json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_delete_api_key",
+    annotations={
+        "title": "Delete API Key",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+async def papra_delete_api_key(params: ApiKeyIdInput) -> str:
+    """Delete an API key by its ID."""
+    try:
+        await papra_request("DELETE", f"/api/api-keys/{params.api_key_id}")
+        return f"API key {params.api_key_id} deleted successfully."
     except Exception as exc:
         return format_error(exc)
 
@@ -382,6 +504,183 @@ async def papra_delete_organization(params: OrgId) -> str:
         return format_error(exc)
 
 
+@mcp.tool(
+    name="papra_list_deleted_organizations",
+    annotations={
+        "title": "List Deleted Organizations",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_list_deleted_organizations() -> str:
+    """List soft-deleted organizations that can still be restored."""
+    try:
+        data = await papra_request("GET", "/api/organizations/deleted")
+        return _pretty_json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_restore_organization",
+    annotations={
+        "title": "Restore Organization",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_restore_organization(params: OrgId) -> str:
+    """Restore a soft-deleted organization."""
+    try:
+        await papra_request(
+            "POST", f"/api/organizations/{params.organization_id}/restore"
+        )
+        return f"Organization {params.organization_id} restored successfully."
+    except Exception as exc:
+        return format_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# Organization members
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(
+    name="papra_list_organization_members",
+    annotations={
+        "title": "List Organization Members",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_list_organization_members(params: OrgId) -> str:
+    """List all members of an organization."""
+    try:
+        data = await papra_request(
+            "GET", f"/api/organizations/{params.organization_id}/members"
+        )
+        return _pretty_json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_get_current_member",
+    annotations={
+        "title": "Get Current Member",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_get_current_member(params: OrgId) -> str:
+    """Get the current authenticated user's membership info for an organization."""
+    try:
+        data = await papra_request(
+            "GET", f"/api/organizations/{params.organization_id}/members/me"
+        )
+        return _pretty_json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_update_member_role",
+    annotations={
+        "title": "Update Member Role",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_update_member_role(params: UpdateMemberRoleInput) -> str:
+    """Update an organization member's role. Valid roles: member, admin, owner."""
+    try:
+        data = await papra_request(
+            "PATCH",
+            f"/api/organizations/{params.organization_id}/members/{params.member_id}",
+            body={"role": params.role},
+        )
+        return _pretty_json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_remove_member",
+    annotations={
+        "title": "Remove Organization Member",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+async def papra_remove_member(params: MemberIdInput) -> str:
+    """Remove a member from an organization."""
+    try:
+        await papra_request(
+            "DELETE",
+            f"/api/organizations/{params.organization_id}/members/{params.member_id}",
+        )
+        return f"Member {params.member_id} removed from organization {params.organization_id}."
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_list_invitations",
+    annotations={
+        "title": "List Organization Invitations",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_list_invitations(params: OrgId) -> str:
+    """List pending invitations for an organization."""
+    try:
+        data = await papra_request(
+            "GET",
+            f"/api/organizations/{params.organization_id}/members/invitations",
+        )
+        return _pretty_json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_create_invitation",
+    annotations={
+        "title": "Create Organization Invitation",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+async def papra_create_invitation(params: CreateInvitationInput) -> str:
+    """Invite a user by email to join an organization with the given role."""
+    try:
+        data = await papra_request(
+            "POST",
+            f"/api/organizations/{params.organization_id}/members/invitations",
+            body={"email": params.email, "role": params.role},
+        )
+        return _pretty_json(data)
+    except Exception as exc:
+        return format_error(exc)
+
+
 # ---------------------------------------------------------------------------
 # Documents
 # ---------------------------------------------------------------------------
@@ -411,6 +710,8 @@ async def papra_list_documents(params: ListDocsInput) -> str:
                 "pageIndex": params.page_index,
                 "pageSize": params.page_size,
                 "searchQuery": params.search_query,
+                "sortField": params.sort_field,
+                "sortOrder": params.sort_order,
             },
         )
         return _pretty_json(data)
@@ -651,6 +952,72 @@ async def papra_delete_document(params: DocId) -> str:
             f"/api/organizations/{params.organization_id}/documents/{params.document_id}",
         )
         return f"Document {params.document_id} deleted successfully."
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_restore_document",
+    annotations={
+        "title": "Restore Document",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_restore_document(params: DocId) -> str:
+    """Restore a soft-deleted document from the trash."""
+    try:
+        await papra_request(
+            "POST",
+            f"/api/organizations/{params.organization_id}/documents/{params.document_id}/restore",
+        )
+        return f"Document {params.document_id} restored successfully."
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_permanently_delete_document",
+    annotations={
+        "title": "Permanently Delete Document",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+async def papra_permanently_delete_document(params: DocId) -> str:
+    """Permanently delete a document from the trash. This cannot be undone."""
+    try:
+        await papra_request(
+            "DELETE",
+            f"/api/organizations/{params.organization_id}/documents/trash/{params.document_id}",
+        )
+        return f"Document {params.document_id} permanently deleted."
+    except Exception as exc:
+        return format_error(exc)
+
+
+@mcp.tool(
+    name="papra_empty_trash",
+    annotations={
+        "title": "Empty Trash",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def papra_empty_trash(params: OrgId) -> str:
+    """Permanently delete all documents in the trash. This cannot be undone."""
+    try:
+        await papra_request(
+            "DELETE",
+            f"/api/organizations/{params.organization_id}/documents/trash",
+        )
+        return "Trash emptied successfully."
     except Exception as exc:
         return format_error(exc)
 

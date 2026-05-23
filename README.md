@@ -69,13 +69,16 @@ Use the MCP inspector to test tools interactively:
 mcp dev papra_mcp.py
 ```
 
-## Tools (23)
+## Tools (37)
 
 ### API Key
 
 | Tool | Description |
 |------|-------------|
 | `papra_check_api_key` | Check the current API key's ID, name, and permissions |
+| `papra_list_api_keys` | List all API keys belonging to the authenticated user |
+| `papra_create_api_key` | Create a new API key with name and permissions (e.g. `documents:read`) |
+| `papra_delete_api_key` | Delete an API key (**destructive**) |
 
 ### Organizations
 
@@ -86,12 +89,25 @@ mcp dev papra_mcp.py
 | `papra_create_organization` | Create a new organization (name: 3-50 chars) |
 | `papra_update_organization` | Update an organization's name |
 | `papra_delete_organization` | Delete an organization (**destructive**) |
+| `papra_list_deleted_organizations` | List soft-deleted organizations |
+| `papra_restore_organization` | Restore a soft-deleted organization |
+
+### Organization Members
+
+| Tool | Description |
+|------|-------------|
+| `papra_list_organization_members` | List all members of an organization |
+| `papra_get_current_member` | Get the current user's membership info |
+| `papra_update_member_role` | Update a member's role (`member`, `admin`, `owner`) |
+| `papra_remove_member` | Remove a member from an organization (**destructive**) |
+| `papra_list_invitations` | List pending invitations |
+| `papra_create_invitation` | Invite a user by email with a role |
 
 ### Documents
 
 | Tool | Description |
 |------|-------------|
-| `papra_list_documents` | List documents with pagination and optional search |
+| `papra_list_documents` | List documents with pagination, optional search, and sorting (`sortField`: `createdAt`/`updatedAt`/`name`/`documentDate`, `sortOrder`: `asc`/`desc`) |
 | `papra_create_document` | Upload a new document (file content + optional OCR languages) |
 | `papra_list_deleted_documents` | List deleted documents (trash) |
 | `papra_get_document` | Get a document's metadata |
@@ -100,6 +116,9 @@ mcp dev papra_mcp.py
 | `papra_get_document_statistics` | Get document count and total size for an organization |
 | `papra_update_document` | Update a document's name or content |
 | `papra_delete_document` | Soft-delete a document (moves to trash) |
+| `papra_restore_document` | Restore a soft-deleted document from the trash |
+| `papra_permanently_delete_document` | Permanently delete a document from the trash (**destructive**) |
+| `papra_empty_trash` | Permanently delete all documents in the trash (**destructive**) |
 | `papra_get_document_activity` | Get the activity log of a document |
 
 ### Tags
