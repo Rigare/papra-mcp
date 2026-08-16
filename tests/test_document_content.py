@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pymupdf
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 # Import the module under test
 import papra_mcp
@@ -185,7 +186,7 @@ def _make_response(
 @pytest.fixture
 def doc_params():
     """Standard parameters for papra_get_document_content."""
-    return papra_mcp.DocId(organization_id="org-1", document_id="doc-1")
+    return papra_mcp.DocBase(organization_id="org-1", document_id="doc-1")
 
 
 class TestGetDocumentContentText:
@@ -406,11 +407,11 @@ class TestGetDocumentContentMissingHeader:
 
 
 class TestGetDocumentContentErrors:
-    """Error handling for document content retrieval."""
+    """Errors must surface as ToolError so MCP marks the result with isError."""
 
     @pytest.mark.asyncio
     async def test_http_404(self, doc_params):
-        """A 404 should produce a human-readable error, not crash."""
+        """A 404 should produce a human-readable ToolError, not crash."""
         error_resp = httpx.Response(
             status_code=404,
             json={"message": "Document not found"},
@@ -419,10 +420,11 @@ class TestGetDocumentContentErrors:
         exc = httpx.HTTPStatusError("Not Found", request=error_resp.request, response=error_resp)
 
         with patch.object(papra_mcp, "papra_file_request", new_callable=AsyncMock, side_effect=exc):
-            result = await papra_mcp.papra_get_document_content(doc_params)
+            with pytest.raises(ToolError) as excinfo:
+                await papra_mcp.papra_get_document_content(doc_params)
 
-        assert "404" in result
-        assert "Document not found" in result
+        assert "404" in str(excinfo.value)
+        assert "Document not found" in str(excinfo.value)
 
     @pytest.mark.asyncio
     async def test_http_403(self, doc_params):
@@ -434,10 +436,11 @@ class TestGetDocumentContentErrors:
         exc = httpx.HTTPStatusError("Forbidden", request=error_resp.request, response=error_resp)
 
         with patch.object(papra_mcp, "papra_file_request", new_callable=AsyncMock, side_effect=exc):
-            result = await papra_mcp.papra_get_document_content(doc_params)
+            with pytest.raises(ToolError) as excinfo:
+                await papra_mcp.papra_get_document_content(doc_params)
 
-        assert "403" in result
-        assert "Forbidden" in result
+        assert "403" in str(excinfo.value)
+        assert "Forbidden" in str(excinfo.value)
 
     @pytest.mark.asyncio
     async def test_network_error(self, doc_params):
@@ -447,10 +450,8 @@ class TestGetDocumentContentErrors:
             new_callable=AsyncMock,
             side_effect=httpx.ConnectError("Connection refused"),
         ):
-            result = await papra_mcp.papra_get_document_content(doc_params)
-
-        assert "Error" in result
-        assert "Connection refused" in result
+            with pytest.raises(ToolError, match="Connection refused"):
+                await papra_mcp.papra_get_document_content(doc_params)
 
     @pytest.mark.asyncio
     async def test_timeout_error(self, doc_params):
@@ -459,9 +460,8 @@ class TestGetDocumentContentErrors:
             new_callable=AsyncMock,
             side_effect=httpx.ReadTimeout("Read timed out"),
         ):
-            result = await papra_mcp.papra_get_document_content(doc_params)
-
-        assert "Error" in result
+            with pytest.raises(ToolError, match="Error"):
+                await papra_mcp.papra_get_document_content(doc_params)
 
 
 class TestGetDocumentContentEdgeCases:
@@ -761,23 +761,22 @@ class TestOrganizationTools:
         papra_mcp._client = mock_client
 
         result = await papra_mcp.papra_delete_organization(
-            papra_mcp.OrgId(organization_id="org-1")
+            papra_mcp.OrgBase(organization_id="org-1")
         )
         assert "org-1" in result
         assert "deleted" in result
 
     @pytest.mark.asyncio
     async def test_error_formatting_propagated(self):
-        """Errors from tools should be formatted, not raised."""
+        """Errors from tools should be raised as formatted ToolErrors."""
         with patch.object(
             papra_mcp,
             "papra_request",
             new_callable=AsyncMock,
             side_effect=httpx.ConnectError("Connection refused"),
         ):
-            result = await papra_mcp.papra_list_organizations()
-        assert "Error" in result
-        assert "Connection refused" in result
+            with pytest.raises(ToolError, match="Connection refused"):
+                await papra_mcp.papra_list_organizations()
 
 
 class TestDocumentTools:
@@ -799,7 +798,7 @@ class TestDocumentTools:
         papra_mcp._client = mock_client
 
         result = await papra_mcp.papra_get_document(
-            papra_mcp.DocId(organization_id="org-1", document_id="doc-1")
+            papra_mcp.DocBase(organization_id="org-1", document_id="doc-1")
         )
         assert "Report.pdf" in result
 
@@ -813,18 +812,18 @@ class TestDocumentTools:
         papra_mcp._client = mock_client
 
         result = await papra_mcp.papra_delete_document(
-            papra_mcp.DocId(organization_id="org-1", document_id="doc-1")
+            papra_mcp.DocBase(organization_id="org-1", document_id="doc-1")
         )
         assert "doc-1" in result
-        assert "deleted" in result
+        assert "trash" in result
 
     @pytest.mark.asyncio
     async def test_update_document_no_fields(self):
-        """Updating with no fields should return a friendly message."""
-        result = await papra_mcp.papra_update_document(
-            papra_mcp.UpdateDocInput(organization_id="org-1", document_id="doc-1")
-        )
-        assert result == "No fields to update."
+        """Updating with no fields is a caller error, not a silent no-op."""
+        with pytest.raises(ToolError, match="No fields to update"):
+            await papra_mcp.papra_update_document(
+                papra_mcp.UpdateDocInput(organization_id="org-1", document_id="doc-1")
+            )
 
 
 class TestTagTools:
@@ -846,14 +845,14 @@ class TestTagTools:
         papra_mcp._client = mock_client
 
         result = await papra_mcp.papra_list_tags(
-            papra_mcp.OrgId(organization_id="org-1")
+            papra_mcp.OrgBase(organization_id="org-1")
         )
         assert "Important" in result
 
     @pytest.mark.asyncio
     async def test_update_tag_no_fields(self):
-        """Updating a tag with no fields should return a friendly message."""
-        result = await papra_mcp.papra_update_tag(
-            papra_mcp.UpdateTagInput(organization_id="org-1", tag_id="tag-1")
-        )
-        assert result == "No fields to update."
+        """Updating a tag with no fields is a caller error, not a silent no-op."""
+        with pytest.raises(ToolError, match="No fields to update"):
+            await papra_mcp.papra_update_tag(
+                papra_mcp.UpdateTagInput(organization_id="org-1", tag_id="tag-1")
+            )
