@@ -794,6 +794,29 @@ async def papra_update_document(params: UpdateDocInput) -> str:
     return _pretty_json(data)
 
 
+@mcp.tool(name="papra_reprocess_document", annotations={"title": "Reprocess Document", **WRITE})
+@tool_errors
+async def papra_reprocess_document(params: DocBase) -> str:
+    """Enqueue a background task to reprocess a document with the current instance configuration.
+
+    Reprocessing re-runs content extraction and OCR using the document's configured OCR
+    languages. Existing content and tags are not cleared while the task is pending.
+    Returns immediately with HTTP 202 — it confirms the task was queued, not that
+    processing has completed.
+
+    Rate limited to 100 requests per hour per organization by default. Requires the
+    documents:update API key permission.
+    """
+    await papra_request(
+        "POST",
+        f"/api/organizations/{params.organization_id}/documents/{params.document_id}/reprocess",
+    )
+    return (
+        f"Reprocessing task for document {params.document_id} queued successfully. "
+        "Processing happens asynchronously in the background."
+    )
+
+
 @mcp.tool(name="papra_delete_document", annotations={"title": "Delete Document", **DESTRUCTIVE})
 @tool_errors
 async def papra_delete_document(params: DocBase) -> str:

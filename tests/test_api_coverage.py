@@ -259,6 +259,49 @@ class TestTrash:
 
 
 # ---------------------------------------------------------------------------
+# Reprocess
+# ---------------------------------------------------------------------------
+
+
+class TestReprocessDocument:
+    """POST /documents/:id/reprocess queues a background reprocessing task."""
+
+    @pytest.mark.asyncio
+    async def test_reprocess_queues_task(self, mock_client, api_response):
+        mock_client.request.return_value = api_response(status_code=202)
+
+        result = await papra_mcp.papra_reprocess_document(
+            papra_mcp.DocBase(organization_id="org-1", document_id="doc-1")
+        )
+
+        method, path, kwargs = _request_call(mock_client)
+        assert method == "POST"
+        assert path == "/api/organizations/org-1/documents/doc-1/reprocess"
+        # No body — the endpoint takes none
+        assert kwargs["json"] is None
+        assert "queued" in result
+        assert "doc-1" in result
+
+    @pytest.mark.asyncio
+    async def test_reprocess_with_empty_body_response(self, mock_client, api_response):
+        """A 202 with an empty body must still report success (not try to parse JSON)."""
+        response = api_response(status_code=202)
+        response.content = b""
+        mock_client.request.return_value = response
+
+        result = await papra_mcp.papra_reprocess_document(
+            papra_mcp.DocBase(organization_id="org-1", document_id="doc-1")
+        )
+        assert "queued" in result
+
+    def test_reprocess_is_annotated_as_write(self):
+        """Reprocessing mutates server state — it must not be read-only."""
+        tool = papra_mcp.mcp._tool_manager.get_tool("papra_reprocess_document")
+        assert tool.annotations.readOnlyHint is False
+        assert tool.annotations.destructiveHint is False
+
+
+# ---------------------------------------------------------------------------
 # Custom properties
 # ---------------------------------------------------------------------------
 
@@ -729,6 +772,7 @@ class TestToolRegistration:
         "papra_get_document_content",
         "papra_get_document_statistics",
         "papra_update_document",
+        "papra_reprocess_document",
         "papra_delete_document",
         "papra_restore_document",
         "papra_delete_document_permanently",
