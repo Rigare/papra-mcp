@@ -5,7 +5,7 @@
 
 An [MCP](https://modelcontextprotocol.io) (Model Context Protocol) server for the [Papra](https://papra.app) document management API. Gives AI assistants the ability to manage organizations, documents, tags, and custom properties in your Papra instance.
 
-Covers all 30 endpoints from the [Papra API documentation](https://docs.papra.app/resources/api-endpoints/), plus trash restore and permanent deletion.
+Covers all 31 endpoints from the [Papra API documentation](https://docs.papra.app/resources/api-endpoints/), plus trash restore and permanent deletion.
 
 ## Prerequisites
 
@@ -73,7 +73,7 @@ ruff check .
 mcp dev papra_mcp.py    # interactive tool inspector
 ```
 
-## Tools (35)
+## Tools (36)
 
 ### API Key
 
@@ -103,6 +103,7 @@ mcp dev papra_mcp.py    # interactive tool inspector
 | `papra_get_document_content` | Get file content (text directly, PDFs as extracted text, other binary as base64) |
 | `papra_get_document_statistics` | Get document count and total size for an organization |
 | `papra_update_document` | Update a document's name or content |
+| `papra_reprocess_document` | Queue background reprocessing (re-extract text, re-run OCR) |
 | `papra_delete_document` | Soft-delete a document (moves to trash) |
 | `papra_get_document_activity` | Get the activity log of a document |
 
