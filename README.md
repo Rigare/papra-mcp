@@ -5,13 +5,14 @@
 
 An [MCP](https://modelcontextprotocol.io) (Model Context Protocol) server for the [Papra](https://papra.app) document management API. Gives AI assistants the ability to manage organizations, documents, tags, and custom properties in your Papra instance.
 
-Covers all 31 endpoints from the [Papra API documentation](https://docs.papra.app/resources/api-endpoints/), plus trash restore and permanent deletion.
+Exposes 32 tools whose routes support Bearer API-key authentication. Session-only routes are deliberately not registered, and the server never falls back to session cookies.
 
 ## Prerequisites
 
 - Python 3.10+
 - A running [Papra](https://github.com/papra-hq/papra) instance
 - An API key from your Papra account settings
+- Papra monorepo version 0.3.0 at commit `648c223b807500f0258c822e0321d6ef4964f064`; compatibility with other server versions is not claimed
 
 ## Installation
 
@@ -73,7 +74,58 @@ ruff check .
 mcp dev papra_mcp.py    # interactive tool inspector
 ```
 
-## Tools (36)
+### Live contract verification
+
+`tests/test_live_papra.py` is an opt-in integration suite for a **separate disposable Papra instance**, never a production instance. It creates a random account, API keys, organizations, documents, and custom properties, and replaces or clears test values. The target must use SQLite, listen on loopback, and report both version 0.3.0 and commit `648c223b807500f0258c822e0321d6ef4964f064` from `/api/config`; the test stops before creating data if either differs.
+
+Run Papra from its own checkout at that commit. Its Dockerfile specifies Node 26.12.1. Install dependencies with `pnpm install --frozen-lockfile`, build with `pnpm --filter "@papra/app-server..." run build`, then run `pnpm migrate:up:prod` and `pnpm start` in `apps/papra-server`. Set `PAPRA_VERSION=0.3.0` and `GIT_COMMIT` to the pinned commit, use matching local base URLs and a random `AUTH_SECRET`, and keep `PROCESS_MODE=web`. A checkout nested in another Git repository must retain its own `.git` metadata so Papra does not report the outer project's commit.
+
+With the disposable server available at `http://127.0.0.1:37065`, run:
+
+```bash
+PAPRA_RUN_LIVE_TESTS=1 \
+PAPRA_LIVE_BASE_URL=http://127.0.0.1:37065 \
+pytest tests/test_live_papra.py
+```
+
+Without `PAPRA_RUN_LIVE_TESTS=1`, these tests are skipped. Browser-session authentication is used only to provision the throwaway account and API keys; all adapter calls under test use Bearer API keys.
+
+## Compatibility and API-key capabilities
+
+The compatibility target is **Papra monorepo 0.3.0**, commit `648c223b807500f0258c822e0321d6ef4964f064`. Route registration and input validation follow that version's authentication middleware and validators. Other versions may work, but are not advertised as supported without a new verification run.
+
+Authentication uses only the `Authorization: Bearer …` API-key header. The adapter does not create, accept, or fall back to session cookies. Create keys with only the permissions required for the tools you use:
+
+| Tools | Minimum API-key scopes |
+|-------|------------------------|
+| `papra_check_api_key` | Any valid API key; no additional scope |
+| `papra_list_organizations`, `papra_get_organization` | `organizations:read` |
+| `papra_create_organization` | `organizations:create` |
+| `papra_update_organization` | `organizations:update` |
+| `papra_delete_organization` | `organizations:delete` |
+| `papra_list_documents`, `papra_search_documents`, `papra_list_deleted_documents`, `papra_get_document`, `papra_get_document_content`, `papra_get_document_statistics`, `papra_get_document_activity` | `documents:read` |
+| `papra_create_document`, `papra_create_text_document` | `documents:create` |
+| `papra_update_document`, `papra_reprocess_document` | `documents:update` |
+| `papra_delete_document` | `documents:delete` |
+| `papra_list_tags` | `tags:read` |
+| `papra_create_tag` | `tags:create` |
+| `papra_update_tag` | `tags:update` |
+| `papra_delete_tag` | `tags:delete` |
+| `papra_add_tag_to_document`, `papra_remove_tag_from_document` | `documents:update` **and** `tags:read` |
+| `papra_list_custom_properties`, `papra_get_custom_property` | `custom-properties:read` |
+| `papra_create_custom_property` | `custom-properties:create` |
+| `papra_update_custom_property` | `custom-properties:update` |
+| `papra_delete_custom_property` | `custom-properties:delete` |
+| `papra_list_document_custom_properties` | `documents:read` **and** `custom-properties:read` |
+| `papra_set_document_custom_property`, `papra_clear_document_custom_property` | `documents:update` **and** `custom-properties:read` |
+
+The following upstream routes require a browser session at the target version, regardless of API-key scopes, and therefore have **no MCP tool**: document restore, permanent document deletion, emptying trash, and applying a tagging rule. Listing deleted documents remains available with `documents:read`.
+
+### Resource IDs
+
+Resource IDs use Papra's actual `<prefix>_<24 lowercase letters or digits>` format. The prefixes are `org_`, `doc_`, `tag_`, `cpd_` (property definitions), `cpso_` (property options), and `usr_` (users). IDs are bound to their resource type and encoded as one URL path segment. Empty values, wrong prefixes, separators, query/fragment characters, dot segments, and percent-encoded or repeatedly encoded navigation variants are rejected before any HTTP request.
+
+## Tools (32)
 
 ### API Key
 
@@ -111,10 +163,7 @@ mcp dev papra_mcp.py    # interactive tool inspector
 
 | Tool | Description |
 |------|-------------|
-| `papra_list_deleted_documents` | List deleted documents (trash) |
-| `papra_restore_document` | Restore a document from the trash |
-| `papra_delete_document_permanently` | Permanently delete one document (**destructive**) |
-| `papra_empty_trash` | Permanently delete the whole trash (**destructive**) |
+| `papra_list_deleted_documents` | List deleted documents (trash); restoring or permanently deleting is session-only in Papra |
 
 ### Tags
 
@@ -126,7 +175,8 @@ mcp dev papra_mcp.py    # interactive tool inspector
 | `papra_delete_tag` | Delete a tag (**destructive**) |
 | `papra_add_tag_to_document` | Associate a tag with a document |
 | `papra_remove_tag_from_document` | Remove a tag from a document |
-| `papra_apply_tagging_rule` | Apply a tagging rule to all existing documents (background task) |
+
+Applying a tagging rule is session-only in Papra and is not exposed as an MCP tool.
 
 ### Custom Properties
 
@@ -135,13 +185,15 @@ mcp dev papra_mcp.py    # interactive tool inspector
 | `papra_list_custom_properties` | List all custom property definitions |
 | `papra_get_custom_property` | Get a custom property definition |
 | `papra_create_custom_property` | Create a custom property definition |
-| `papra_update_custom_property` | Update name, description, or options |
+| `papra_update_custom_property` | Update name, description, or replace options |
 | `papra_delete_custom_property` | Delete a definition and its values (**destructive**) |
 | `papra_list_document_custom_properties` | List the properties set on a document |
-| `papra_set_document_custom_property` | Set a property value on a document |
+| `papra_set_document_custom_property` | Replace a property value on a document |
 | `papra_clear_document_custom_property` | Clear a property value from a document |
 
-Custom properties support the types `text`, `number`, `date`, `boolean`, `select`, `multi_select`, `user_relation`, and `document_relation`. They need the matching `custom-properties:*` API key permissions.
+Custom properties support the types `text`, `number`, `date`, `boolean`, `select`, `multi_select`, `user_relation`, and `document_relation`. They need the API-key permissions listed above. Creating a select or multi-select definition requires a non-empty list of option names. Updating options requires the current or new definition `name` plus full `{id, name}` objects for retained options and `{name}` objects for new options; omitted existing options are removed. Papra 0.3.0 otherwise fails internally while applying an options-only update, so the adapter rejects that incomplete payload before HTTP. An option list cannot be empty because select definitions require at least one option. Id-less entries always create new options with fresh IDs, so updates containing them are not idempotent; fetch the definition and use the returned IDs in subsequent replacement payloads.
+
+Select takes one `cpso_` option ID. Multi-select, user relation, and document relation take arrays of `cpso_`, `usr_`, and `doc_` IDs respectively, never a scalar. Setting a value replaces all previous values: omitted IDs are removed, and `[]` clears a multi-valued property. Use `papra_clear_document_custom_property` to remove a property value of any type.
 
 ## Uploading documents
 

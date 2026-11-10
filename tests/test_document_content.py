@@ -186,7 +186,7 @@ def _make_response(
 @pytest.fixture
 def doc_params():
     """Standard parameters for papra_get_document_content."""
-    return papra_mcp.DocBase(organization_id="org-1", document_id="doc-1")
+    return papra_mcp.DocBase(organization_id="org_111111111111111111111111", document_id="doc_333333333333333333333333")
 
 
 class TestGetDocumentContentText:
@@ -415,7 +415,7 @@ class TestGetDocumentContentErrors:
         error_resp = httpx.Response(
             status_code=404,
             json={"message": "Document not found"},
-            request=httpx.Request("GET", "http://test/api/organizations/org-1/documents/doc-1/file"),
+            request=httpx.Request("GET", "http://test/api/organizations/org_111111111111111111111111/documents/doc_333333333333333333333333/file"),
         )
         exc = httpx.HTTPStatusError("Not Found", request=error_resp.request, response=error_resp)
 
@@ -431,7 +431,7 @@ class TestGetDocumentContentErrors:
         error_resp = httpx.Response(
             status_code=403,
             json={"message": "Forbidden"},
-            request=httpx.Request("GET", "http://test/api/organizations/org-1/documents/doc-1/file"),
+            request=httpx.Request("GET", "http://test/api/organizations/org_111111111111111111111111/documents/doc_333333333333333333333333/file"),
         )
         exc = httpx.HTTPStatusError("Forbidden", request=error_resp.request, response=error_resp)
 
@@ -700,12 +700,12 @@ class TestPapraRequest:
         mock_client = AsyncMock()
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {"id": "org-1", "name": "Test Org"}
+        mock_response.json.return_value = {"id": "org_111111111111111111111111", "name": "Test Org"}
         mock_client.request.return_value = mock_response
         papra_mcp._client = mock_client
 
-        result = await papra_mcp.papra_request("GET", "/api/organizations/org-1")
-        assert result == {"id": "org-1", "name": "Test Org"}
+        result = await papra_mcp.papra_request("GET", "/api/organizations/org_111111111111111111111111")
+        assert result == {"id": "org_111111111111111111111111", "name": "Test Org"}
 
 
 # ---------------------------------------------------------------------------
@@ -727,7 +727,7 @@ class TestOrganizationTools:
         mock_client = AsyncMock()
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = [{"id": "org-1", "name": "Acme"}]
+        mock_response.json.return_value = [{"id": "org_111111111111111111111111", "name": "Acme"}]
         mock_client.request.return_value = mock_response
         papra_mcp._client = mock_client
 
@@ -761,9 +761,9 @@ class TestOrganizationTools:
         papra_mcp._client = mock_client
 
         result = await papra_mcp.papra_delete_organization(
-            papra_mcp.OrgBase(organization_id="org-1")
+            papra_mcp.OrgBase(organization_id="org_111111111111111111111111")
         )
-        assert "org-1" in result
+        assert "org_111111111111111111111111" in result
         assert "deleted" in result
 
     @pytest.mark.asyncio
@@ -793,12 +793,12 @@ class TestDocumentTools:
         mock_client = AsyncMock()
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {"id": "doc-1", "name": "Report.pdf"}
+        mock_response.json.return_value = {"id": "doc_333333333333333333333333", "name": "Report.pdf"}
         mock_client.request.return_value = mock_response
         papra_mcp._client = mock_client
 
         result = await papra_mcp.papra_get_document(
-            papra_mcp.DocBase(organization_id="org-1", document_id="doc-1")
+            papra_mcp.DocBase(organization_id="org_111111111111111111111111", document_id="doc_333333333333333333333333")
         )
         assert "Report.pdf" in result
 
@@ -812,9 +812,9 @@ class TestDocumentTools:
         papra_mcp._client = mock_client
 
         result = await papra_mcp.papra_delete_document(
-            papra_mcp.DocBase(organization_id="org-1", document_id="doc-1")
+            papra_mcp.DocBase(organization_id="org_111111111111111111111111", document_id="doc_333333333333333333333333")
         )
-        assert "doc-1" in result
+        assert "doc_333333333333333333333333" in result
         assert "trash" in result
 
     @pytest.mark.asyncio
@@ -822,7 +822,7 @@ class TestDocumentTools:
         """Updating with no fields is a caller error, not a silent no-op."""
         with pytest.raises(ToolError, match="No fields to update"):
             await papra_mcp.papra_update_document(
-                papra_mcp.UpdateDocInput(organization_id="org-1", document_id="doc-1")
+                papra_mcp.UpdateDocInput(organization_id="org_111111111111111111111111", document_id="doc_333333333333333333333333")
             )
 
 
@@ -840,12 +840,12 @@ class TestTagTools:
         mock_client = AsyncMock()
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = [{"id": "tag-1", "name": "Important"}]
+        mock_response.json.return_value = [{"id": "tag_555555555555555555555555", "name": "Important"}]
         mock_client.request.return_value = mock_response
         papra_mcp._client = mock_client
 
         result = await papra_mcp.papra_list_tags(
-            papra_mcp.OrgBase(organization_id="org-1")
+            papra_mcp.OrgBase(organization_id="org_111111111111111111111111")
         )
         assert "Important" in result
 
@@ -854,5 +854,5 @@ class TestTagTools:
         """Updating a tag with no fields is a caller error, not a silent no-op."""
         with pytest.raises(ToolError, match="No fields to update"):
             await papra_mcp.papra_update_tag(
-                papra_mcp.UpdateTagInput(organization_id="org-1", tag_id="tag-1")
+                papra_mcp.UpdateTagInput(organization_id="org_111111111111111111111111", tag_id="tag_555555555555555555555555")
             )
