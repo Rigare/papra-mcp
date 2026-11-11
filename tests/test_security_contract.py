@@ -323,6 +323,7 @@ def test_multi_valued_properties_require_arrays(property_type):
 def test_scalar_and_select_values_match_the_declared_property_type(property_type, value):
     params = papra_mcp.SetDocPropertyInput(
         organization_id=ORG_ID,
+        document_id=DOC_ID,
         property_definition_id=PROPERTY_ID,
         property_type=property_type,
         value=value,
