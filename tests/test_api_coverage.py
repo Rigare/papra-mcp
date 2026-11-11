@@ -585,7 +585,7 @@ class TestStrictTextDecoding:
         parsed = json.loads(result)
         assert parsed["encoding"] == "base64"
         assert base64.b64decode(parsed["data"]) == payload
-        assert "" not in result  # no replacement characters
+        assert "\ufffd" not in result  # no replacement characters
 
     @pytest.mark.asyncio
     async def test_unknown_charset_decodes_as_utf8(self, doc_params, monkeypatch):
