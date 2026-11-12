@@ -148,16 +148,72 @@ Resource IDs use Papra's actual `<prefix>_<24 lowercase letters or digits>` form
 | Tool | Description |
 |------|-------------|
 | `papra_list_documents` | List documents with pagination, search, and sorting |
-| `papra_search_documents` | Search documents (supports `name:`, `content:`, `tag:`, `created:`, `AND`, `OR`, `NOT`) |
+| `papra_search_documents` | Search documents (`name:`, `content:`, `tag:`, `created:`, `date:`, `has:date`, `has:tags`, `AND`, `OR`, `NOT`) with next-page navigation |
 | `papra_create_document` | Upload a document from base64-encoded content |
 | `papra_create_text_document` | Upload a document from plain text, no base64 needed |
 | `papra_get_document` | Get a document's metadata |
 | `papra_get_document_content` | Get file content (text directly, PDFs as extracted text, other binary as base64) |
 | `papra_get_document_statistics` | Get document count and total size for an organization |
-| `papra_update_document` | Update a document's name or content |
+| `papra_update_document` | Replace name, indexed content, document date or notes; omitted fields stay unchanged |
 | `papra_reprocess_document` | Queue background reprocessing (re-extract text, re-run OCR) |
 | `papra_delete_document` | Soft-delete a document (moves to trash) |
 | `papra_get_document_activity` | Get the activity log of a document |
+
+#### Document date and notes
+
+`papra_update_document` requires `documents:update` and takes one `params` object. Every supplied value replaces the current field. Omitted fields stay unchanged; an update with no values is rejected.
+
+```json
+{
+  "params": {
+    "organization_id": "org_111111111111111111111111",
+    "document_id": "doc_111111111111111111111111",
+    "document_date": "2026-11-10",
+    "notes": "Reviewed against the original invoice."
+  }
+}
+```
+
+`document_date` maps to Papra's `documentDate`. Use `YYYY-MM-DD` for UTC midnight, or an ISO 8601 datetime with a timezone, such as `2026-11-10T14:30:00+01:00`. Explicit `"document_date": null` clears the date. `notes` replaces the full text, accepts at most 2048 UTF-16 code units (most characters count as one; an emoji can count as two), and is cleared with `"notes": ""`. Explicit `"notes": null` is invalid. For example, supplying only `document_date: null` leaves the name, indexed content and notes unchanged. These operations are marked destructive and idempotent in the tool annotations because they can overwrite or clear existing values.
+
+#### Search filters and navigation
+
+Both `papra_list_documents` and `papra_search_documents` use the existing `GET /documents` API. They pass `search_query` unchanged, including quotes and spaces. The following examples are verified for the supported Papra 0.3.0 commit:
+
+| `search_query` | Matches |
+|---|---|
+| `has:date` | Documents with a document date |
+| `has:tags` | Documents with at least one tag |
+| `date:>=2026-11-10 date:<2026-11-11` | Document dates within 10 November 2026 in UTC |
+| `name:"quarterly report" has:date has:tags date:>=2026-01-01 date:<2027-01-01` | Names containing the quoted phrase, with tags and a document date in 2026 |
+| `has:date NOT has:tags` | Dated documents with no tags |
+
+Adjacent filters are combined with AND; `AND`, `OR`, `NOT` and parentheses are also supported. `date:` compares exact instants: `date:2026-11-10` means midnight, so use a lower and upper bound for a whole day. Invalid dates do not match. The pinned [update validators](https://github.com/papra-hq/papra/blob/648c223b807500f0258c822e0321d6ef4964f064/apps/papra-server/src/modules/documents/documents.schemas.ts) and [search implementation](https://github.com/papra-hq/papra/blob/648c223b807500f0258c822e0321d6ef4964f064/apps/papra-server/src/modules/documents/document-search/database-fts5/query-builder/query-builder.ts) define this contract.
+
+Pages are zero-based, with `page_size` from 1 to 100 (default 100). Results retain Papra's `documents` and `documentsCount` and add `pagination` with `page_index`, `page_size`, `has_more` and `next_call`. For 101 matches at the default page size, page 0 returns 100 documents and this navigation:
+
+```json
+{
+  "page_index": 0,
+  "page_size": 100,
+  "has_more": true,
+  "next_call": {
+    "name": "papra_search_documents",
+    "arguments": {
+      "params": {
+        "organization_id": "org_111111111111111111111111",
+        "page_index": 1,
+        "page_size": 100,
+        "search_query": "has:date",
+        "sort_field": "createdAt",
+        "sort_order": "desc"
+      }
+    }
+  }
+}
+```
+
+Call the indicated tool with exactly `next_call.arguments`. It preserves the query, sort and page size; listing results point back to `papra_list_documents`. Continue until `has_more` is false and `next_call` is null. In this example page 1 returns the last document. Empty results and pages beyond the end have the same terminal state. Pagination reads the current collection on each call; changes during traversal can shift results between pages.
 
 ### Trash
 

@@ -71,7 +71,11 @@ async def _bootstrap() -> dict[str, Any]:
         assert user_id.startswith("usr_")
 
         tokens = {}
-        for name, scopes in (("full", ALL_SCOPES), ("minimal", ["documents:read"])):
+        for name, scopes in (
+            ("full", ALL_SCOPES),
+            ("minimal", ["documents:read"]),
+            ("update_only", ["documents:update"]),
+        ):
             response = await session.post(
                 "/api/api-keys",
                 json={"name": f"OPE-11 {name} {unique}", "permissions": scopes},
@@ -363,3 +367,193 @@ async def test_real_property_validators_and_replacement_semantics(live_server):
             )
         )
         assert select_id not in await _property_values(organization_id, document_id)
+
+
+@pytest.mark.asyncio
+async def test_real_document_metadata_update_scope_boundaries_and_omission(live_server):
+    async with _adapter_client(live_server["full"]) as reader:
+        organization_id = await _create_organization()
+        document_id = await _create_document(organization_id, "metadata.txt")
+        path = f"/api/organizations/{organization_id}/documents/{document_id}"
+
+        async def stored():
+            response = await reader.get(path)
+            assert response.status_code == 200, response.text
+            return response.json()["document"]
+
+        original = await stored()
+        async with _adapter_client(live_server["update_only"]) as updater:
+            current = json.loads(await papra_mcp.papra_check_api_key())
+            assert current["apiKey"]["permissions"] == ["documents:update"]
+            assert (await updater.get(path)).status_code == 401
+
+            result = json.loads(await papra_mcp.papra_update_document(
+                papra_mcp.UpdateDocInput(
+                    organization_id=organization_id,
+                    document_id=document_id,
+                    document_date="2026-11-10T12:00:00+02:00",
+                    notes="A disposable note",
+                )
+            ))
+            assert result["document"]["documentDate"] == "2026-11-10T10:00:00.000Z"
+            document = await stored()
+            assert document["notes"] == "A disposable note"
+            assert document["name"] == original["name"]
+            assert document["content"] == original["content"]
+
+            await papra_mcp.papra_update_document(papra_mcp.UpdateDocInput(
+                organization_id=organization_id, document_id=document_id, notes=""
+            ))
+            document = await stored()
+            assert document["notes"] == ""
+            assert document["documentDate"] == "2026-11-10T10:00:00.000Z"
+
+            await papra_mcp.papra_update_document(papra_mcp.UpdateDocInput(
+                organization_id=organization_id,
+                document_id=document_id,
+                document_date="2026-11-11",
+            ))
+            document = await stored()
+            assert document["documentDate"] == "2026-11-11T00:00:00.000Z"
+            assert document["notes"] == ""
+
+            for notes in ("a" * 2048, "😀" * 1024):
+                await papra_mcp.papra_update_document(papra_mcp.UpdateDocInput(
+                    organization_id=organization_id, document_id=document_id, notes=notes
+                ))
+                assert (await stored())["notes"] == notes
+
+            before = await stored()
+            for body in (
+                {"notes": "a" * 2049},
+                {"notes": "😀" * 1025},
+                {"notes": None},
+                {"documentDate": "not-a-date"},
+                {},
+            ):
+                response = await updater.patch(path, json=body)
+                assert response.status_code == 400, response.text
+                after = await stored()
+                for field in ("name", "content", "notes", "documentDate"):
+                    assert after[field] == before[field]
+
+            await papra_mcp.papra_update_document(papra_mcp.UpdateDocInput(
+                organization_id=organization_id, document_id=document_id, document_date=None
+            ))
+            document = await stored()
+            assert document["documentDate"] is None
+            assert document["notes"] == "😀" * 1024
+
+            await papra_mcp.papra_update_document(papra_mcp.UpdateDocInput(
+                organization_id=organization_id, document_id=document_id, name="renamed.txt"
+            ))
+            document = await stored()
+            assert document["name"] == "renamed.txt"
+            assert document["documentDate"] is None
+            assert document["notes"] == "😀" * 1024
+
+    async with _adapter_client(live_server["minimal"]):
+        with pytest.raises(ToolError, match="401"):
+            await papra_mcp.papra_update_document(papra_mcp.UpdateDocInput(
+                organization_id=organization_id, document_id=document_id, notes="must fail"
+            ))
+
+
+@pytest.mark.asyncio
+async def test_real_document_date_and_existence_search_examples(live_server):
+    async with _adapter_client(live_server["full"]):
+        organization_id = await _create_organization()
+        tag = json.loads(await papra_mcp.papra_create_tag(papra_mcp.CreateTagInput(
+            organization_id=organization_id, name="OPE-13 search tag", color="#123456"
+        )))["tag"]
+        documents = {}
+        fixtures = (
+            ("match", "2026-06-15T12:00:00Z", True),
+            ("untagged", "2026-01-01", False),
+            ("dateless", None, True),
+            ("before", "2025-12-31T23:59:59.999Z", True),
+            ("after", "2027-01-01T00:00:00Z", True),
+        )
+        for name, document_date, tagged in fixtures:
+            document_id = await _create_document(organization_id, f"quarterly report {name}.txt")
+            documents[name] = document_id
+            if document_date is not None:
+                await papra_mcp.papra_update_document(papra_mcp.UpdateDocInput(
+                    organization_id=organization_id,
+                    document_id=document_id,
+                    document_date=document_date,
+                ))
+            if tagged:
+                await papra_mcp.papra_add_tag_to_document(papra_mcp.DocTagInput(
+                    organization_id=organization_id, document_id=document_id, tag_id=tag["id"]
+                ))
+
+        examples = (
+            (
+                'date:>=2026-01-01 date:<2027-01-01 has:date has:tags name:"quarterly report"',
+                {"match"},
+            ),
+            ('date:>=2026-01-01 date:<2027-01-01 name:"quarterly report"', {"match", "untagged"}),
+            ("has:date", {"match", "untagged", "before", "after"}),
+            ("-has:date", {"dateless"}),
+            ("has:tags", {"match", "dateless", "before", "after"}),
+            ("-has:tags", {"untagged"}),
+        )
+        for query, names in examples:
+            for tool, model in (
+                (papra_mcp.papra_search_documents, papra_mcp.SearchDocsInput),
+                (papra_mcp.papra_list_documents, papra_mcp.ListDocsInput),
+            ):
+                result = json.loads(await tool(model(
+                    organization_id=organization_id, search_query=f"  {query}  "
+                )))
+                assert {document["id"] for document in result["documents"]} == {
+                    documents[name] for name in names
+                }, query
+                assert result["documentsCount"] == len(names)
+                assert result["pagination"]["next_call"] is None
+
+
+@pytest.mark.asyncio
+async def test_real_search_and_list_navigation_beyond_one_hundred(live_server):
+    async with _adapter_client(live_server["full"]):
+        organization_id = await _create_organization()
+        expected = [
+            await _create_document(organization_id, f"navigation fixture {index:03d}.txt")
+            for index in range(101)
+        ]
+
+        for tool_name, model, search in (
+            ("papra_list_documents", papra_mcp.ListDocsInput, {}),
+            (
+                "papra_search_documents",
+                papra_mcp.SearchDocsInput,
+                {"search_query": 'name:"navigation fixture"'},
+            ),
+        ):
+            call = {
+                "name": tool_name,
+                "arguments": {"params": {
+                    "organization_id": organization_id,
+                    "page_size": 100,
+                    "sort_field": "name",
+                    "sort_order": "asc",
+                    **search,
+                }},
+            }
+            seen = []
+            for page_index, expected_page_size in ((0, 100), (1, 1)):
+                assert call["name"] == tool_name
+                result = json.loads(await getattr(papra_mcp, call["name"])(
+                    model(**call["arguments"]["params"])
+                ))
+                assert result["documentsCount"] == 101
+                assert len(result["documents"]) == expected_page_size
+                seen.extend(document["id"] for document in result["documents"])
+                pagination = result["pagination"]
+                assert pagination["page_index"] == page_index
+                assert pagination["has_more"] is (page_index == 0)
+                call = pagination["next_call"]
+            assert call is None
+            assert seen == expected
+            assert len(set(seen)) == 101

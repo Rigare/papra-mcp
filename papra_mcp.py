@@ -12,6 +12,7 @@ import re
 import sys
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import date, datetime
 from typing import Annotated, Any, Literal, ParamSpec
 from urllib.parse import quote, urlparse
 
@@ -19,7 +20,8 @@ import httpx
 import pymupdf
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
-from pydantic import BaseModel, Field, StringConstraints, model_validator
+from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 logger = logging.getLogger("papra_mcp")
 
@@ -276,9 +278,9 @@ def _pretty_json(data: Any) -> str:
     return json.dumps(data, indent=2, ensure_ascii=False)
 
 
-def _body_from(fields: dict[str, Any]) -> dict[str, Any]:
-    """Drop unset (``None``) fields, raising if nothing is left to send."""
-    body = {k: v for k, v in fields.items() if v is not None}
+def _body_from(fields: dict[str, Any], *, nullable_fields: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Drop None except for explicitly nullable fields; reject empty updates."""
+    body = {k: v for k, v in fields.items() if v is not None or k in nullable_fields}
     if not body:
         raise ToolError("No fields to update — provide at least one field to change.")
     return body
@@ -367,14 +369,24 @@ SortOrder = Literal["asc", "desc"]
 class ListDocsInput(PaginatedOrgBase):
     search_query: str | None = Field(
         default=None,
-        description="Optional search query. Supports filters: name:, content:, tag:, created: and operators AND, OR, NOT",
+        description=(
+            "Optional search query, passed unchanged. Supports name:, content:, tag:, created:, date:, "
+            "has:date, has:tags and AND, OR, NOT. Example: date:>=2026-11-10 date:<2026-11-11 has:tags"
+        ),
     )
     sort_field: SortField = Field(default="createdAt", description="Field to sort by")
     sort_order: SortOrder = Field(default="desc", description="Sort direction")
 
 
 class SearchDocsInput(PaginatedOrgBase):
-    search_query: str = Field(..., description="Search query string", min_length=1)
+    search_query: str = Field(
+        ...,
+        description=(
+            "Search query, passed unchanged. Example: name:\"Annual report\" has:date has:tags; "
+            "UTC day range: date:>=2026-11-10 date:<2026-11-11"
+        ),
+        min_length=1,
+    )
     sort_field: SortField = Field(default="createdAt", description="Field to sort by")
     sort_order: SortOrder = Field(default="desc", description="Sort direction")
 
@@ -382,6 +394,46 @@ class SearchDocsInput(PaginatedOrgBase):
 class UpdateDocInput(DocBase):
     name: str | None = Field(default=None, description="New document name")
     content: str | None = Field(default=None, description="New document content (for search)")
+    document_date: str | None = Field(
+        default=None,
+        description=(
+            "Document date as YYYY-MM-DD (UTC midnight) or an ISO 8601 datetime with timezone. "
+            "Explicit null clears documentDate; omit to keep the current date."
+        ),
+    )
+    notes: str | SkipJsonSchema[None] = Field(
+        default=None,
+        max_length=2048,
+        description=(
+            "Replacement notes, at most 2048 UTF-16 code units (an emoji may count as two). "
+            "Empty string clears notes; omit to keep current notes. Explicit null is invalid."
+        ),
+    )
+
+    @field_validator("document_date")
+    @classmethod
+    def validate_document_date(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            date.fromisoformat(value)
+        elif re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?"
+            r"(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)", value
+        ):
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+        else:
+            raise ValueError("document_date must be YYYY-MM-DD or an ISO 8601 datetime with timezone")
+        return value
+
+    @field_validator("notes", mode="before")
+    @classmethod
+    def validate_notes(cls, value: Any) -> Any:
+        if value is None:
+            raise ValueError("notes cannot be null; use an empty string to clear notes")
+        if isinstance(value, str) and sum(2 if ord(char) > 0xFFFF else 1 for char in value) > 2048:
+            raise ValueError("notes must contain at most 2048 UTF-16 code units")
+        return value
 
 
 class CreateDocInput(OrgBase):
@@ -664,6 +716,7 @@ async def _list_documents(
     search_query: str | None,
     sort_field: str,
     sort_order: str,
+    tool_name: str = "papra_list_documents",
 ) -> str:
     data = await papra_request(
         "GET",
@@ -676,6 +729,23 @@ async def _list_documents(
             "sortOrder": sort_order,
         },
     )
+    has_more = (page_index + 1) * page_size < data["documentsCount"]
+    data["pagination"] = {
+        "page_index": page_index,
+        "page_size": page_size,
+        "has_more": has_more,
+        "next_call": {
+            "name": tool_name,
+            "arguments": {"params": {
+                "organization_id": organization_id,
+                "page_index": page_index + 1,
+                "page_size": page_size,
+                "search_query": search_query,
+                "sort_field": sort_field,
+                "sort_order": sort_order,
+            }},
+        } if has_more else None,
+    }
     return _pretty_json(data)
 
 
@@ -684,8 +754,12 @@ async def _list_documents(
 async def papra_list_documents(params: ListDocsInput) -> str:
     """List documents in an organization with optional pagination, search, and sorting.
 
-    The searchQuery supports advanced filters like name:, content:, tag:, created:
-    and logical operators AND, OR, NOT.
+    Search supports name:, content:, tag:, created:, date:, has:date, has:tags,
+    AND, OR, NOT and parentheses. Example: name:"Annual report" has:date has:tags.
+    For a UTC day use date:>=2026-11-10 date:<2026-11-11; date: alone compares
+    an exact instant. Queries are passed unchanged. Follow pagination.next_call
+    with the same params to retrieve more than 100 results; null marks the end.
+    Each call reads the current collection, so concurrent changes may shift pages.
     """
     return await _list_documents(
         organization_id=params.organization_id,
@@ -701,8 +775,12 @@ async def papra_list_documents(params: ListDocsInput) -> str:
 @tool_errors
 async def papra_search_documents(params: SearchDocsInput) -> str:
     """Search documents by name or content. Supports advanced search syntax with
-    filters (name:, content:, tag:, created:), logical operators (AND, OR, NOT),
-    and grouping with parentheses.
+    filters (name:, content:, tag:, created:, date:, has:date, has:tags), logical
+    operators (AND, OR, NOT), and grouping with parentheses. Queries are passed
+    unchanged, including quoted spaces: name:"Annual report" has:date has:tags.
+    For a UTC day use date:>=2026-11-10 date:<2026-11-11; date: alone compares
+    an exact instant. Follow pagination.next_call for the next page (including
+    results beyond 100); null marks the end. Concurrent changes may shift pages.
     """
     return await _list_documents(
         organization_id=params.organization_id,
@@ -711,6 +789,7 @@ async def papra_search_documents(params: SearchDocsInput) -> str:
         search_query=params.search_query,
         sort_field=params.sort_field,
         sort_order=params.sort_order,
+        tool_name="papra_search_documents",
     )
 
 
@@ -873,8 +952,17 @@ async def papra_get_document_statistics(params: OrgBase) -> str:
 @mcp.tool(name="papra_update_document", annotations={"title": "Update Document", **DESTRUCTIVE})
 @tool_errors
 async def papra_update_document(params: UpdateDocInput) -> str:
-    """Update a document's name or content (for search indexing). Both fields are optional."""
-    body = _body_from({"name": params.name, "content": params.content})
+    """Replace a document's name, indexed content, document_date or notes.
+
+    Requires documents:update. Omitted fields stay unchanged. Set document_date
+    to an ISO 8601 date/datetime, or explicit null to clear documentDate. Notes
+    replace the full value: use an empty string to clear, never null; the limit
+    is 2048 UTF-16 code units. At least one changed field is required.
+    """
+    fields = params.model_dump(mode="json", exclude_unset=True, exclude={"organization_id", "document_id"})
+    if "document_date" in fields:
+        fields["documentDate"] = fields.pop("document_date")
+    body = _body_from(fields, nullable_fields=("documentDate",))
     data = await papra_request(
         "PATCH",
         f"/api/organizations/{_path_segment(params.organization_id)}/documents/{_path_segment(params.document_id)}",
