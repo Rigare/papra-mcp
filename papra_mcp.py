@@ -6,18 +6,20 @@ import binascii
 import functools
 import json
 import logging
+import math
 import os
+import re
 import sys
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import Any, Literal, ParamSpec
-from urllib.parse import urlparse
+from typing import Annotated, Any, Literal, ParamSpec
+from urllib.parse import quote, urlparse
 
 import httpx
 import pymupdf
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints, model_validator
 
 logger = logging.getLogger("papra_mcp")
 
@@ -301,18 +303,39 @@ WRITE = {
     "openWorldHint": True,
 }
 IDEMPOTENT_WRITE = {**WRITE, "idempotentHint": True}
-DESTRUCTIVE = {**WRITE, "destructiveHint": True}
+DESTRUCTIVE = {**IDEMPOTENT_WRITE, "destructiveHint": True}
 
 # ---------------------------------------------------------------------------
 # Input models
 # ---------------------------------------------------------------------------
 
 
+def _papra_id_type(prefix: str) -> Any:
+    return Annotated[str, StringConstraints(pattern=rf"^{prefix}_[a-z0-9]{{24}}$")]
+
+
+OrganizationId = _papra_id_type("org")
+DocumentId = _papra_id_type("doc")
+TagId = _papra_id_type("tag")
+PropertyDefinitionId = _papra_id_type("cpd")
+PropertyOptionId = _papra_id_type("cpso")
+UserId = _papra_id_type("usr")
+
+_ID_PATTERNS = {
+    prefix: re.compile(rf"^{prefix}_[a-z0-9]{{24}}$")
+    for prefix in ("org", "doc", "tag", "cpd", "cpso", "usr")
+}
+
+
+def _path_segment(resource_id: str) -> str:
+    return quote(resource_id, safe="")
+
+
 # -- Base models --
 
 
 class OrgBase(BaseModel):
-    organization_id: str = Field(..., description="The organization ID", min_length=1)
+    organization_id: OrganizationId = Field(..., description="The organization ID")
 
 
 class PaginatedOrgBase(OrgBase):
@@ -321,7 +344,7 @@ class PaginatedOrgBase(OrgBase):
 
 
 class DocBase(OrgBase):
-    document_id: str = Field(..., description="The document ID", min_length=1)
+    document_id: DocumentId = Field(..., description="The document ID")
 
 
 # -- Organization models --
@@ -412,22 +435,18 @@ class CreateTagInput(OrgBase):
 
 
 class UpdateTagInput(OrgBase):
-    tag_id: str = Field(..., description="The tag ID", min_length=1)
+    tag_id: TagId = Field(..., description="The tag ID")
     name: str | None = Field(default=None, description="New tag name")
     color: str | None = Field(default=None, description="New hex color", pattern=r"^#[0-9a-fA-F]{6}$")
     description: str | None = Field(default=None, description="New description")
 
 
 class TagIdInput(OrgBase):
-    tag_id: str = Field(..., description="The tag ID", min_length=1)
+    tag_id: TagId = Field(..., description="The tag ID")
 
 
 class DocTagInput(DocBase):
-    tag_id: str = Field(..., description="The tag ID", min_length=1)
-
-
-class ApplyTaggingRuleInput(OrgBase):
-    tagging_rule_id: str = Field(..., description="The tagging rule ID", min_length=1)
+    tag_id: TagId = Field(..., description="The tag ID")
 
 
 # -- Custom property models --
@@ -442,60 +461,130 @@ PropertyType = Literal[
     "user_relation",
     "document_relation",
 ]
-
-# text -> str, number -> int/float, boolean -> bool, date -> ISO 8601 str,
-# select/user_relation/document_relation -> option or entity ID, multi_select -> list of IDs.
 PropertyValue = bool | int | float | str | list[str]
+PropertyOptionName = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=255),
+]
 
 
 class PropertyDefBase(OrgBase):
-    property_definition_id: str = Field(
-        ..., description="The custom property definition ID", min_length=1
+    property_definition_id: PropertyDefinitionId = Field(
+        ..., description="The custom property definition ID"
     )
 
 
 class PropertyOptionInput(BaseModel):
-    id: str | None = Field(default=None, description="ID of an existing option to keep")
-    name: str | None = Field(default=None, description="Name of a new option to add")
+    id: PropertyOptionId = Field(default=None, description="ID of an existing option to keep")
+    name: PropertyOptionName = Field(..., description="Option name (required for both kept and new options)")
 
 
 class CreatePropertyDefInput(OrgBase):
-    name: str = Field(..., description="Custom property name", min_length=1)
+    name: str = Field(..., description="Custom property name", min_length=1, max_length=255)
     type: PropertyType = Field(..., description="Custom property type")
     description: str | None = Field(default=None, description="Optional description")
-    options: list[str] | None = Field(
+    options: list[PropertyOptionName] | None = Field(
         default=None,
-        description="Option names, only for the 'select' and 'multi_select' types",
+        min_length=1,
+        description="Non-empty option names, required for 'select' and 'multi_select' types",
     )
+
+    @model_validator(mode="after")
+    def validate_options_for_type(self):
+        supports_options = self.type in {"select", "multi_select"}
+        if supports_options and self.options is None:
+            raise ValueError(f"{self.type} requires a non-empty options list")
+        if not supports_options and self.options is not None:
+            raise ValueError(f"{self.type} does not support options")
+        return self
 
 
 class UpdatePropertyDefInput(PropertyDefBase):
-    name: str | None = Field(default=None, description="New custom property name")
+    name: str | None = Field(
+        default=None,
+        description="Current or new custom property name; required when replacing options on Papra 0.3.0",
+        min_length=1,
+        max_length=255,
+    )
     description: str | None = Field(default=None, description="New description")
     options: list[PropertyOptionInput] | None = Field(
         default=None,
+        min_length=1,
         description=(
-            "Full option list for 'select'/'multi_select' properties. Use id for options to keep, "
-            "name for new ones. Options left out are removed."
+            "Full replacement option list for 'select'/'multi_select' properties. Every entry "
+            "requires a name; kept options also include their id. Omitted options are removed. "
+            "An empty option list is invalid."
         ),
     )
+
+    @model_validator(mode="after")
+    def validate_option_replacement(self):
+        if self.options is not None and self.name is None:
+            raise ValueError(
+                "name is required when replacing options on Papra 0.3.0; "
+                "provide the current or a new definition name"
+            )
+        return self
 
 
 class DocPropertyBase(DocBase):
-    property_definition_id: str = Field(
-        ..., description="The custom property definition ID", min_length=1
+    property_definition_id: PropertyDefinitionId = Field(
+        ..., description="The custom property definition ID"
     )
+
+
+def _has_id_prefix(value: Any, prefix: str) -> bool:
+    return isinstance(value, str) and _ID_PATTERNS[prefix].fullmatch(value) is not None
 
 
 class SetDocPropertyInput(DocPropertyBase):
+    property_type: PropertyType = Field(
+        ...,
+        description="Type of the existing property definition; used to validate the replacement value",
+    )
     value: PropertyValue = Field(
         ...,
         description=(
-            "The value to set. Text/date as a string (dates in ISO 8601), numbers as a number, "
-            "booleans as true/false, select and relation types as the target ID, "
-            "multi_select as a list of option IDs."
+            "Full replacement value: text/date as a string, number as a finite number, boolean "
+            "as true/false, select as one option ID, and multi_select/user_relation/"
+            "document_relation as arrays of option/user/document IDs. [] clears all values "
+            "for multi-valued properties; omitted IDs are removed."
         ),
     )
+
+    @model_validator(mode="after")
+    def validate_value_for_type(self):
+        property_type = self.property_type
+        value = self.value
+
+        if property_type == "text" and (not isinstance(value, str) or len(value) > 10_000):
+            raise ValueError("text requires a string of at most 10,000 characters")
+        if property_type == "number" and (
+            isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+        ):
+            raise ValueError("number requires a finite number, not a boolean or string")
+        if property_type == "boolean" and not isinstance(value, bool):
+            raise ValueError("boolean requires true or false")
+        if property_type == "date" and (
+            isinstance(value, bool) or not isinstance(value, (str, int, float))
+        ):
+            raise ValueError("date requires an ISO 8601 string or a timestamp")
+        if property_type == "select" and not _has_id_prefix(value, "cpso"):
+            raise ValueError("select requires one valid cpso_ option ID")
+        if property_type == "multi_select" and (
+            not isinstance(value, list) or any(not _has_id_prefix(item, "cpso") for item in value)
+        ):
+            raise ValueError("multi_select requires an array of valid cpso_ option IDs; [] clears values")
+        if property_type == "user_relation" and (
+            not isinstance(value, list) or any(not _has_id_prefix(item, "usr") for item in value)
+        ):
+            raise ValueError("user_relation requires an array of valid usr_ IDs; [] clears values")
+        if property_type == "document_relation" and (
+            not isinstance(value, list) or any(not _has_id_prefix(item, "doc") for item in value)
+        ):
+            raise ValueError("document_relation requires an array of valid doc_ IDs; [] clears values")
+
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -527,7 +616,7 @@ async def papra_list_organizations() -> str:
 async def papra_get_organization(params: OrgBase) -> str:
     """Get details of a specific organization by its ID."""
     return _pretty_json(
-        await papra_request("GET", f"/api/organizations/{params.organization_id}")
+        await papra_request("GET", f"/api/organizations/{_path_segment(params.organization_id)}")
     )
 
 
@@ -542,14 +631,14 @@ async def papra_create_organization(params: CreateOrgInput) -> str:
 
 @mcp.tool(
     name="papra_update_organization",
-    annotations={"title": "Update Organization", **IDEMPOTENT_WRITE},
+    annotations={"title": "Update Organization", **DESTRUCTIVE},
 )
 @tool_errors
 async def papra_update_organization(params: OrgName) -> str:
     """Update an organization's name."""
     return _pretty_json(
         await papra_request(
-            "PUT", f"/api/organizations/{params.organization_id}", body={"name": params.name}
+            "PUT", f"/api/organizations/{_path_segment(params.organization_id)}", body={"name": params.name}
         )
     )
 
@@ -558,7 +647,7 @@ async def papra_update_organization(params: OrgName) -> str:
 @tool_errors
 async def papra_delete_organization(params: OrgBase) -> str:
     """Delete an organization by its ID. This is a destructive operation."""
-    await papra_request("DELETE", f"/api/organizations/{params.organization_id}")
+    await papra_request("DELETE", f"/api/organizations/{_path_segment(params.organization_id)}")
     return f"Organization {params.organization_id} deleted successfully."
 
 
@@ -578,7 +667,7 @@ async def _list_documents(
 ) -> str:
     data = await papra_request(
         "GET",
-        f"/api/organizations/{organization_id}/documents",
+        f"/api/organizations/{_path_segment(organization_id)}/documents",
         params={
             "pageIndex": page_index,
             "pageSize": page_size,
@@ -634,7 +723,7 @@ async def papra_list_deleted_documents(params: PaginatedOrgBase) -> str:
     """List deleted documents (trash) in an organization."""
     data = await papra_request(
         "GET",
-        f"/api/organizations/{params.organization_id}/documents/deleted",
+        f"/api/organizations/{_path_segment(params.organization_id)}/documents/deleted",
         params={"pageIndex": params.page_index, "pageSize": params.page_size},
     )
     return _pretty_json(data)
@@ -656,7 +745,7 @@ async def _create_document(
     data = {"ocrLanguages": ocr_languages} if ocr_languages else None
 
     response = await papra_upload_request(
-        f"/api/organizations/{organization_id}/documents",
+        f"/api/organizations/{_path_segment(organization_id)}/documents",
         files={"file": file_field},
         data=data,
     )
@@ -714,7 +803,7 @@ async def papra_get_document(params: DocBase) -> str:
     """Get a document's metadata by its ID."""
     data = await papra_request(
         "GET",
-        f"/api/organizations/{params.organization_id}/documents/{params.document_id}",
+        f"/api/organizations/{_path_segment(params.organization_id)}/documents/{_path_segment(params.document_id)}",
     )
     return _pretty_json(data)
 
@@ -735,7 +824,7 @@ async def papra_get_document_content(params: DocBase) -> str:
     decode it. Oversized text is truncated; oversized binary content is refused.
     """
     response = await papra_file_request(
-        f"/api/organizations/{params.organization_id}/documents/{params.document_id}/file",
+        f"/api/organizations/{_path_segment(params.organization_id)}/documents/{_path_segment(params.document_id)}/file",
     )
     raw = response.content
     content_type = response.headers.get("content-type", "application/octet-stream")
@@ -776,19 +865,19 @@ async def papra_get_document_statistics(params: OrgBase) -> str:
     """Get statistics (document count and total size) for an organization."""
     data = await papra_request(
         "GET",
-        f"/api/organizations/{params.organization_id}/documents/statistics",
+        f"/api/organizations/{_path_segment(params.organization_id)}/documents/statistics",
     )
     return _pretty_json(data)
 
 
-@mcp.tool(name="papra_update_document", annotations={"title": "Update Document", **IDEMPOTENT_WRITE})
+@mcp.tool(name="papra_update_document", annotations={"title": "Update Document", **DESTRUCTIVE})
 @tool_errors
 async def papra_update_document(params: UpdateDocInput) -> str:
     """Update a document's name or content (for search indexing). Both fields are optional."""
     body = _body_from({"name": params.name, "content": params.content})
     data = await papra_request(
         "PATCH",
-        f"/api/organizations/{params.organization_id}/documents/{params.document_id}",
+        f"/api/organizations/{_path_segment(params.organization_id)}/documents/{_path_segment(params.document_id)}",
         body=body,
     )
     return _pretty_json(data)
@@ -809,7 +898,7 @@ async def papra_reprocess_document(params: DocBase) -> str:
     """
     await papra_request(
         "POST",
-        f"/api/organizations/{params.organization_id}/documents/{params.document_id}/reprocess",
+        f"/api/organizations/{_path_segment(params.organization_id)}/documents/{_path_segment(params.document_id)}/reprocess",
     )
     return (
         f"Reprocessing task for document {params.document_id} queued successfully. "
@@ -823,45 +912,9 @@ async def papra_delete_document(params: DocBase) -> str:
     """Soft-delete a document (moves to trash). Permanently deleted after retention period."""
     await papra_request(
         "DELETE",
-        f"/api/organizations/{params.organization_id}/documents/{params.document_id}",
+        f"/api/organizations/{_path_segment(params.organization_id)}/documents/{_path_segment(params.document_id)}",
     )
     return f"Document {params.document_id} moved to trash successfully."
-
-
-@mcp.tool(name="papra_restore_document", annotations={"title": "Restore Document", **IDEMPOTENT_WRITE})
-@tool_errors
-async def papra_restore_document(params: DocBase) -> str:
-    """Restore a soft-deleted document from the trash."""
-    await papra_request(
-        "POST",
-        f"/api/organizations/{params.organization_id}/documents/{params.document_id}/restore",
-    )
-    return f"Document {params.document_id} restored successfully."
-
-
-@mcp.tool(
-    name="papra_delete_document_permanently",
-    annotations={"title": "Delete Document Permanently", **DESTRUCTIVE},
-)
-@tool_errors
-async def papra_delete_document_permanently(params: DocBase) -> str:
-    """Permanently delete a document from the trash. This cannot be undone."""
-    await papra_request(
-        "DELETE",
-        f"/api/organizations/{params.organization_id}/documents/trash/{params.document_id}",
-    )
-    return f"Document {params.document_id} permanently deleted."
-
-
-@mcp.tool(name="papra_empty_trash", annotations={"title": "Empty Trash", **DESTRUCTIVE})
-@tool_errors
-async def papra_empty_trash(params: OrgBase) -> str:
-    """Permanently delete every document in the organization's trash. This cannot be undone."""
-    await papra_request(
-        "DELETE",
-        f"/api/organizations/{params.organization_id}/documents/trash",
-    )
-    return f"Trash emptied for organization {params.organization_id}."
 
 
 @mcp.tool(
@@ -873,7 +926,7 @@ async def papra_get_document_activity(params: DocActivityInput) -> str:
     """Get the activity log of a document."""
     data = await papra_request(
         "GET",
-        f"/api/organizations/{params.organization_id}/documents/{params.document_id}/activity",
+        f"/api/organizations/{_path_segment(params.organization_id)}/documents/{_path_segment(params.document_id)}/activity",
         params={"pageIndex": params.page_index, "pageSize": params.page_size},
     )
     return _pretty_json(data)
@@ -889,7 +942,7 @@ async def papra_get_document_activity(params: DocActivityInput) -> str:
 async def papra_list_tags(params: OrgBase) -> str:
     """List all tags in an organization."""
     return _pretty_json(
-        await papra_request("GET", f"/api/organizations/{params.organization_id}/tags")
+        await papra_request("GET", f"/api/organizations/{_path_segment(params.organization_id)}/tags")
     )
 
 
@@ -902,12 +955,12 @@ async def papra_create_tag(params: CreateTagInput) -> str:
         body["description"] = params.description
 
     data = await papra_request(
-        "POST", f"/api/organizations/{params.organization_id}/tags", body=body
+        "POST", f"/api/organizations/{_path_segment(params.organization_id)}/tags", body=body
     )
     return _pretty_json(data)
 
 
-@mcp.tool(name="papra_update_tag", annotations={"title": "Update Tag", **IDEMPOTENT_WRITE})
+@mcp.tool(name="papra_update_tag", annotations={"title": "Update Tag", **DESTRUCTIVE})
 @tool_errors
 async def papra_update_tag(params: UpdateTagInput) -> str:
     """Update a tag's name, color, or description. All fields are optional."""
@@ -916,7 +969,7 @@ async def papra_update_tag(params: UpdateTagInput) -> str:
     )
     data = await papra_request(
         "PUT",
-        f"/api/organizations/{params.organization_id}/tags/{params.tag_id}",
+        f"/api/organizations/{_path_segment(params.organization_id)}/tags/{_path_segment(params.tag_id)}",
         body=body,
     )
     return _pretty_json(data)
@@ -928,7 +981,7 @@ async def papra_delete_tag(params: TagIdInput) -> str:
     """Delete a tag by its ID."""
     await papra_request(
         "DELETE",
-        f"/api/organizations/{params.organization_id}/tags/{params.tag_id}",
+        f"/api/organizations/{_path_segment(params.organization_id)}/tags/{_path_segment(params.tag_id)}",
     )
     return f"Tag {params.tag_id} deleted successfully."
 
@@ -942,7 +995,7 @@ async def papra_add_tag_to_document(params: DocTagInput) -> str:
     """Associate a tag with a document."""
     await papra_request(
         "POST",
-        f"/api/organizations/{params.organization_id}/documents/{params.document_id}/tags",
+        f"/api/organizations/{_path_segment(params.organization_id)}/documents/{_path_segment(params.document_id)}/tags",
         body={"tagId": params.tag_id},
     )
     return f"Tag {params.tag_id} added to document {params.document_id} successfully."
@@ -950,29 +1003,16 @@ async def papra_add_tag_to_document(params: DocTagInput) -> str:
 
 @mcp.tool(
     name="papra_remove_tag_from_document",
-    annotations={"title": "Remove Tag from Document", **IDEMPOTENT_WRITE},
+    annotations={"title": "Remove Tag from Document", **DESTRUCTIVE},
 )
 @tool_errors
 async def papra_remove_tag_from_document(params: DocTagInput) -> str:
     """Remove a tag association from a document."""
     await papra_request(
         "DELETE",
-        f"/api/organizations/{params.organization_id}/documents/{params.document_id}/tags/{params.tag_id}",
+        f"/api/organizations/{_path_segment(params.organization_id)}/documents/{_path_segment(params.document_id)}/tags/{_path_segment(params.tag_id)}",
     )
     return f"Tag {params.tag_id} removed from document {params.document_id} successfully."
-
-
-@mcp.tool(name="papra_apply_tagging_rule", annotations={"title": "Apply Tagging Rule", **WRITE})
-@tool_errors
-async def papra_apply_tagging_rule(params: ApplyTaggingRuleInput) -> str:
-    """Enqueue a background task to apply a tagging rule to all existing documents.
-    Returns a task ID for tracking.
-    """
-    data = await papra_request(
-        "POST",
-        f"/api/organizations/{params.organization_id}/tagging-rules/{params.tagging_rule_id}/apply",
-    )
-    return _pretty_json(data)
 
 
 # ---------------------------------------------------------------------------
@@ -988,7 +1028,7 @@ async def papra_apply_tagging_rule(params: ApplyTaggingRuleInput) -> str:
 async def papra_list_custom_properties(params: OrgBase) -> str:
     """List all custom property definitions of an organization."""
     data = await papra_request(
-        "GET", f"/api/organizations/{params.organization_id}/custom-properties"
+        "GET", f"/api/organizations/{_path_segment(params.organization_id)}/custom-properties"
     )
     return _pretty_json(data)
 
@@ -1002,7 +1042,7 @@ async def papra_get_custom_property(params: PropertyDefBase) -> str:
     """Get a custom property definition by its ID."""
     data = await papra_request(
         "GET",
-        f"/api/organizations/{params.organization_id}/custom-properties/{params.property_definition_id}",
+        f"/api/organizations/{_path_segment(params.organization_id)}/custom-properties/{_path_segment(params.property_definition_id)}",
     )
     return _pretty_json(data)
 
@@ -1026,21 +1066,24 @@ async def papra_create_custom_property(params: CreatePropertyDefInput) -> str:
         body["options"] = [{"name": name} for name in params.options]
 
     data = await papra_request(
-        "POST", f"/api/organizations/{params.organization_id}/custom-properties", body=body
+        "POST", f"/api/organizations/{_path_segment(params.organization_id)}/custom-properties", body=body
     )
     return _pretty_json(data)
 
 
 @mcp.tool(
     name="papra_update_custom_property",
-    annotations={"title": "Update Custom Property Definition", **IDEMPOTENT_WRITE},
+    annotations={"title": "Update Custom Property Definition", **WRITE, "destructiveHint": True},
 )
 @tool_errors
 async def papra_update_custom_property(params: UpdatePropertyDefInput) -> str:
     """Update a custom property definition's name, description, or options.
 
-    The options list replaces the existing one: keep an option by passing its
-    id, add one by passing a name. Options that are left out are removed.
+    The non-empty options list replaces the existing one. Every option requires
+    a name; kept options also include their id. Options left out are removed.
+    When replacing options, also provide the current or new definition name;
+    Papra 0.3.0 cannot process an options-only update. New options receive fresh
+    IDs, so repeating a request with id-less options is not idempotent.
     """
     options = (
         [option.model_dump(exclude_none=True) for option in params.options]
@@ -1052,7 +1095,7 @@ async def papra_update_custom_property(params: UpdatePropertyDefInput) -> str:
     )
     data = await papra_request(
         "PUT",
-        f"/api/organizations/{params.organization_id}/custom-properties/{params.property_definition_id}",
+        f"/api/organizations/{_path_segment(params.organization_id)}/custom-properties/{_path_segment(params.property_definition_id)}",
         body=body,
     )
     return _pretty_json(data)
@@ -1067,7 +1110,7 @@ async def papra_delete_custom_property(params: PropertyDefBase) -> str:
     """Delete a custom property definition and its values on all documents."""
     await papra_request(
         "DELETE",
-        f"/api/organizations/{params.organization_id}/custom-properties/{params.property_definition_id}",
+        f"/api/organizations/{_path_segment(params.organization_id)}/custom-properties/{_path_segment(params.property_definition_id)}",
     )
     return f"Custom property {params.property_definition_id} deleted successfully."
 
@@ -1081,28 +1124,29 @@ async def papra_list_document_custom_properties(params: DocBase) -> str:
     """List all custom properties currently set on a document."""
     data = await papra_request(
         "GET",
-        f"/api/organizations/{params.organization_id}/documents/{params.document_id}/custom-properties",
+        f"/api/organizations/{_path_segment(params.organization_id)}/documents/{_path_segment(params.document_id)}/custom-properties",
     )
     return _pretty_json(data)
 
 
 @mcp.tool(
     name="papra_set_document_custom_property",
-    annotations={"title": "Set Document Custom Property", **IDEMPOTENT_WRITE},
+    annotations={"title": "Set Document Custom Property", **DESTRUCTIVE},
 )
 @tool_errors
 async def papra_set_document_custom_property(params: SetDocPropertyInput) -> str:
-    """Set the value of a custom property on a document.
+    """Replace the value of a custom property on a document.
 
-    The value must match the property's type: a string for text and date
-    (ISO 8601), a number for number, true/false for boolean, an option or
-    entity ID for select and the relation types, and a list of option IDs
-    for multi_select.
+    property_type must match the existing definition. Text/date use strings,
+    number uses a finite number, boolean uses true/false, and select uses one
+    option ID. multi_select, user_relation, and document_relation require arrays
+    of their respective IDs. Setting an array replaces all previous values:
+    omitted IDs are removed and [] clears the property's values.
     """
     await papra_request(
         "PUT",
-        f"/api/organizations/{params.organization_id}/documents/{params.document_id}"
-        f"/custom-properties/{params.property_definition_id}",
+        f"/api/organizations/{_path_segment(params.organization_id)}/documents/{_path_segment(params.document_id)}"
+        f"/custom-properties/{_path_segment(params.property_definition_id)}",
         body={"value": params.value},
     )
     return (
@@ -1113,15 +1157,15 @@ async def papra_set_document_custom_property(params: SetDocPropertyInput) -> str
 
 @mcp.tool(
     name="papra_clear_document_custom_property",
-    annotations={"title": "Clear Document Custom Property", **IDEMPOTENT_WRITE},
+    annotations={"title": "Clear Document Custom Property", **DESTRUCTIVE},
 )
 @tool_errors
 async def papra_clear_document_custom_property(params: DocPropertyBase) -> str:
     """Clear a custom property value from a document."""
     await papra_request(
         "DELETE",
-        f"/api/organizations/{params.organization_id}/documents/{params.document_id}"
-        f"/custom-properties/{params.property_definition_id}",
+        f"/api/organizations/{_path_segment(params.organization_id)}/documents/{_path_segment(params.document_id)}"
+        f"/custom-properties/{_path_segment(params.property_definition_id)}",
     )
     return (
         f"Custom property {params.property_definition_id} cleared from "

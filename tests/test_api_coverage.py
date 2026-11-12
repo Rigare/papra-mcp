@@ -3,7 +3,7 @@
 Covers:
 - Document creation (file name, MIME type, strict base64, plain-text variant)
 - Search and sorting hitting the real /documents endpoint
-- Trash handling (restore, permanent delete, empty)
+- API-key-capable trash listing and destructive annotations
 - Custom property definitions and per-document values
 - Content size limits and strict text decoding
 - Configuration parsing
@@ -36,12 +36,12 @@ class TestCreateDocument:
 
     @pytest.mark.asyncio
     async def test_sends_file_name_and_content(self, mock_client, api_response):
-        mock_client.request.return_value = api_response({"document": {"id": "doc-1"}})
+        mock_client.request.return_value = api_response({"document": {"id": "doc_333333333333333333333333"}})
         payload = b"%PDF-1.4 invoice"
 
         result = await papra_mcp.papra_create_document(
             papra_mcp.CreateDocInput(
-                organization_id="org-1",
+                organization_id="org_111111111111111111111111",
                 file_name="invoice-2026-01.pdf",
                 file_content=base64.b64encode(payload).decode(),
             )
@@ -49,19 +49,19 @@ class TestCreateDocument:
 
         method, path, kwargs = _request_call(mock_client)
         assert method == "POST"
-        assert path == "/api/organizations/org-1/documents"
+        assert path == "/api/organizations/org_111111111111111111111111/documents"
         # File name must reach Papra — it becomes the document name.
         assert kwargs["files"]["file"] == ("invoice-2026-01.pdf", payload)
         assert kwargs["data"] is None
-        assert "doc-1" in result
+        assert "doc_333333333333333333333333" in result
 
     @pytest.mark.asyncio
     async def test_explicit_content_type_is_forwarded(self, mock_client, api_response):
-        mock_client.request.return_value = api_response({"document": {"id": "doc-1"}})
+        mock_client.request.return_value = api_response({"document": {"id": "doc_333333333333333333333333"}})
 
         await papra_mcp.papra_create_document(
             papra_mcp.CreateDocInput(
-                organization_id="org-1",
+                organization_id="org_111111111111111111111111",
                 file_name="scan.tiff",
                 file_content=base64.b64encode(b"II*\x00").decode(),
                 content_type="image/tiff",
@@ -73,11 +73,11 @@ class TestCreateDocument:
 
     @pytest.mark.asyncio
     async def test_ocr_languages_are_forwarded(self, mock_client, api_response):
-        mock_client.request.return_value = api_response({"document": {"id": "doc-1"}})
+        mock_client.request.return_value = api_response({"document": {"id": "doc_333333333333333333333333"}})
 
         await papra_mcp.papra_create_document(
             papra_mcp.CreateDocInput(
-                organization_id="org-1",
+                organization_id="org_111111111111111111111111",
                 file_name="scan.pdf",
                 file_content=base64.b64encode(b"%PDF").decode(),
                 ocr_languages="deu",
@@ -102,7 +102,7 @@ class TestCreateDocument:
         with pytest.raises(ToolError, match="not valid base64"):
             await papra_mcp.papra_create_document(
                 papra_mcp.CreateDocInput(
-                    organization_id="org-1",
+                    organization_id="org_111111111111111111111111",
                     file_name="note.txt",
                     file_content=bad_input,
                 )
@@ -118,7 +118,7 @@ class TestCreateDocument:
 
         result = await papra_mcp.papra_create_document(
             papra_mcp.CreateDocInput(
-                organization_id="org-1",
+                organization_id="org_111111111111111111111111",
                 file_name="a.txt",
                 file_content=base64.b64encode(b"hi").decode(),
             )
@@ -135,7 +135,7 @@ class TestCreateTextDocument:
 
         await papra_mcp.papra_create_text_document(
             papra_mcp.CreateTextDocInput(
-                organization_id="org-1",
+                organization_id="org_111111111111111111111111",
                 file_name="notiz.md",
                 text_content="# Überschrift\n\nInhalt 日本語",
             )
@@ -160,12 +160,12 @@ class TestListAndSearch:
         mock_client.request.return_value = api_response({"documents": [], "documentsCount": 0})
 
         await papra_mcp.papra_search_documents(
-            papra_mcp.SearchDocsInput(organization_id="org-1", search_query="tag:invoice")
+            papra_mcp.SearchDocsInput(organization_id="org_111111111111111111111111", search_query="tag:invoice")
         )
 
         method, path, kwargs = _request_call(mock_client)
         assert method == "GET"
-        assert path == "/api/organizations/org-1/documents"
+        assert path == "/api/organizations/org_111111111111111111111111/documents"
         assert kwargs["params"]["searchQuery"] == "tag:invoice"
 
     @pytest.mark.asyncio
@@ -174,7 +174,7 @@ class TestListAndSearch:
 
         await papra_mcp.papra_list_documents(
             papra_mcp.ListDocsInput(
-                organization_id="org-1", sort_field="documentDate", sort_order="asc"
+                organization_id="org_111111111111111111111111", sort_field="documentDate", sort_order="asc"
             )
         )
 
@@ -186,7 +186,7 @@ class TestListAndSearch:
     async def test_list_defaults(self, mock_client, api_response):
         mock_client.request.return_value = api_response({"documents": [], "documentsCount": 0})
 
-        await papra_mcp.papra_list_documents(papra_mcp.ListDocsInput(organization_id="org-1"))
+        await papra_mcp.papra_list_documents(papra_mcp.ListDocsInput(organization_id="org_111111111111111111111111"))
 
         _, _, kwargs = _request_call(mock_client)
         assert kwargs["params"] == {
@@ -200,7 +200,7 @@ class TestListAndSearch:
 
     def test_rejects_unknown_sort_field(self):
         with pytest.raises(ValueError):
-            papra_mcp.ListDocsInput(organization_id="org-1", sort_field="size")
+            papra_mcp.ListDocsInput(organization_id="org_111111111111111111111111", sort_field="size")
 
 
 # ---------------------------------------------------------------------------
@@ -209,50 +209,35 @@ class TestListAndSearch:
 
 
 class TestTrash:
-    """Restore and permanent deletion round out the trash workflow."""
+    """Only the API-key-capable read route is exposed through MCP."""
 
     @pytest.mark.asyncio
-    async def test_restore_document(self, mock_client, api_response):
-        mock_client.request.return_value = api_response(status_code=204)
+    async def test_list_deleted_documents(self, mock_client, api_response):
+        mock_client.request.return_value = api_response({"documents": [], "documentsCount": 0})
 
-        result = await papra_mcp.papra_restore_document(
-            papra_mcp.DocBase(organization_id="org-1", document_id="doc-1")
+        await papra_mcp.papra_list_deleted_documents(
+            papra_mcp.PaginatedOrgBase(
+                organization_id="org_111111111111111111111111"
+            )
         )
 
-        method, path, _ = _request_call(mock_client)
-        assert (method, path) == ("POST", "/api/organizations/org-1/documents/doc-1/restore")
-        assert "restored" in result
-
-    @pytest.mark.asyncio
-    async def test_delete_permanently(self, mock_client, api_response):
-        mock_client.request.return_value = api_response(status_code=204)
-
-        result = await papra_mcp.papra_delete_document_permanently(
-            papra_mcp.DocBase(organization_id="org-1", document_id="doc-1")
+        method, path, kwargs = _request_call(mock_client)
+        assert (method, path) == (
+            "GET",
+            "/api/organizations/org_111111111111111111111111/documents/deleted",
         )
-
-        method, path, _ = _request_call(mock_client)
-        assert (method, path) == ("DELETE", "/api/organizations/org-1/documents/trash/doc-1")
-        assert "permanently deleted" in result
-
-    @pytest.mark.asyncio
-    async def test_empty_trash(self, mock_client, api_response):
-        mock_client.request.return_value = api_response(status_code=204)
-
-        result = await papra_mcp.papra_empty_trash(papra_mcp.OrgBase(organization_id="org-1"))
-
-        method, path, _ = _request_call(mock_client)
-        assert (method, path) == ("DELETE", "/api/organizations/org-1/documents/trash")
-        assert "org-1" in result
+        assert kwargs["params"] == {"pageIndex": 0, "pageSize": 100}
 
     def test_destructive_tools_are_annotated(self):
-        """Irreversible tools must advertise destructiveHint so clients can gate them."""
+        """Removing and replacing tools must advertise destructiveHint."""
         for name in (
-            "papra_delete_document_permanently",
-            "papra_empty_trash",
             "papra_delete_organization",
+            "papra_delete_document",
             "papra_delete_tag",
+            "papra_remove_tag_from_document",
             "papra_delete_custom_property",
+            "papra_set_document_custom_property",
+            "papra_clear_document_custom_property",
         ):
             tool = papra_mcp.mcp._tool_manager.get_tool(name)
             assert tool.annotations.destructiveHint is True, name
@@ -271,16 +256,16 @@ class TestReprocessDocument:
         mock_client.request.return_value = api_response(status_code=202)
 
         result = await papra_mcp.papra_reprocess_document(
-            papra_mcp.DocBase(organization_id="org-1", document_id="doc-1")
+            papra_mcp.DocBase(organization_id="org_111111111111111111111111", document_id="doc_333333333333333333333333")
         )
 
         method, path, kwargs = _request_call(mock_client)
         assert method == "POST"
-        assert path == "/api/organizations/org-1/documents/doc-1/reprocess"
+        assert path == "/api/organizations/org_111111111111111111111111/documents/doc_333333333333333333333333/reprocess"
         # No body — the endpoint takes none
         assert kwargs["json"] is None
         assert "queued" in result
-        assert "doc-1" in result
+        assert "doc_333333333333333333333333" in result
 
     @pytest.mark.asyncio
     async def test_reprocess_with_empty_body_response(self, mock_client, api_response):
@@ -290,7 +275,7 @@ class TestReprocessDocument:
         mock_client.request.return_value = response
 
         result = await papra_mcp.papra_reprocess_document(
-            papra_mcp.DocBase(organization_id="org-1", document_id="doc-1")
+            papra_mcp.DocBase(organization_id="org_111111111111111111111111", document_id="doc_333333333333333333333333")
         )
         assert "queued" in result
 
@@ -313,43 +298,43 @@ class TestCustomPropertyDefinitions:
     async def test_list(self, mock_client, api_response):
         mock_client.request.return_value = api_response({"propertyDefinitions": []})
 
-        await papra_mcp.papra_list_custom_properties(papra_mcp.OrgBase(organization_id="org-1"))
+        await papra_mcp.papra_list_custom_properties(papra_mcp.OrgBase(organization_id="org_111111111111111111111111"))
 
         method, path, _ = _request_call(mock_client)
-        assert (method, path) == ("GET", "/api/organizations/org-1/custom-properties")
+        assert (method, path) == ("GET", "/api/organizations/org_111111111111111111111111/custom-properties")
 
     @pytest.mark.asyncio
     async def test_get(self, mock_client, api_response):
-        mock_client.request.return_value = api_response({"propertyDefinition": {"id": "cp-1"}})
+        mock_client.request.return_value = api_response({"propertyDefinition": {"id": "cpd_666666666666666666666666"}})
 
         await papra_mcp.papra_get_custom_property(
-            papra_mcp.PropertyDefBase(organization_id="org-1", property_definition_id="cp-1")
+            papra_mcp.PropertyDefBase(organization_id="org_111111111111111111111111", property_definition_id="cpd_666666666666666666666666")
         )
 
         method, path, _ = _request_call(mock_client)
-        assert (method, path) == ("GET", "/api/organizations/org-1/custom-properties/cp-1")
+        assert (method, path) == ("GET", "/api/organizations/org_111111111111111111111111/custom-properties/cpd_666666666666666666666666")
 
     @pytest.mark.asyncio
     async def test_create_simple(self, mock_client, api_response):
-        mock_client.request.return_value = api_response({"propertyDefinition": {"id": "cp-1"}})
+        mock_client.request.return_value = api_response({"propertyDefinition": {"id": "cpd_666666666666666666666666"}})
 
         await papra_mcp.papra_create_custom_property(
             papra_mcp.CreatePropertyDefInput(
-                organization_id="org-1", name="Amount", type="number"
+                organization_id="org_111111111111111111111111", name="Amount", type="number"
             )
         )
 
         method, path, kwargs = _request_call(mock_client)
-        assert (method, path) == ("POST", "/api/organizations/org-1/custom-properties")
+        assert (method, path) == ("POST", "/api/organizations/org_111111111111111111111111/custom-properties")
         assert kwargs["json"] == {"name": "Amount", "type": "number"}
 
     @pytest.mark.asyncio
     async def test_create_select_wraps_option_names(self, mock_client, api_response):
-        mock_client.request.return_value = api_response({"propertyDefinition": {"id": "cp-1"}})
+        mock_client.request.return_value = api_response({"propertyDefinition": {"id": "cpd_666666666666666666666666"}})
 
         await papra_mcp.papra_create_custom_property(
             papra_mcp.CreatePropertyDefInput(
-                organization_id="org-1",
+                organization_id="org_111111111111111111111111",
                 name="Status",
                 type="select",
                 description="Processing state",
@@ -368,31 +353,36 @@ class TestCustomPropertyDefinitions:
     def test_rejects_unknown_type(self):
         with pytest.raises(ValueError):
             papra_mcp.CreatePropertyDefInput(
-                organization_id="org-1", name="X", type="currency"
+                organization_id="org_111111111111111111111111", name="X", type="currency"
             )
 
     @pytest.mark.asyncio
     async def test_update_mixes_existing_and_new_options(self, mock_client, api_response):
-        mock_client.request.return_value = api_response({"propertyDefinition": {"id": "cp-1"}})
+        mock_client.request.return_value = api_response({"propertyDefinition": {"id": "cpd_666666666666666666666666"}})
 
         await papra_mcp.papra_update_custom_property(
             papra_mcp.UpdatePropertyDefInput(
-                organization_id="org-1",
-                property_definition_id="cp-1",
+                organization_id="org_111111111111111111111111",
+                property_definition_id="cpd_666666666666666666666666",
                 name="Status",
                 options=[
-                    papra_mcp.PropertyOptionInput(id="opt-1"),
+                    papra_mcp.PropertyOptionInput(
+                        id="cpso_777777777777777777777777", name="open"
+                    ),
                     papra_mcp.PropertyOptionInput(name="overdue"),
                 ],
             )
         )
 
         method, path, kwargs = _request_call(mock_client)
-        assert (method, path) == ("PUT", "/api/organizations/org-1/custom-properties/cp-1")
+        assert (method, path) == ("PUT", "/api/organizations/org_111111111111111111111111/custom-properties/cpd_666666666666666666666666")
         # Unset fields must be dropped, not sent as null
         assert kwargs["json"] == {
             "name": "Status",
-            "options": [{"id": "opt-1"}, {"name": "overdue"}],
+            "options": [
+                {"id": "cpso_777777777777777777777777", "name": "open"},
+                {"name": "overdue"},
+            ],
         }
 
     @pytest.mark.asyncio
@@ -400,7 +390,7 @@ class TestCustomPropertyDefinitions:
         with pytest.raises(ToolError, match="No fields to update"):
             await papra_mcp.papra_update_custom_property(
                 papra_mcp.UpdatePropertyDefInput(
-                    organization_id="org-1", property_definition_id="cp-1"
+                    organization_id="org_111111111111111111111111", property_definition_id="cpd_666666666666666666666666"
                 )
             )
 
@@ -409,12 +399,12 @@ class TestCustomPropertyDefinitions:
         mock_client.request.return_value = api_response(status_code=204)
 
         result = await papra_mcp.papra_delete_custom_property(
-            papra_mcp.PropertyDefBase(organization_id="org-1", property_definition_id="cp-1")
+            papra_mcp.PropertyDefBase(organization_id="org_111111111111111111111111", property_definition_id="cpd_666666666666666666666666")
         )
 
         method, path, _ = _request_call(mock_client)
-        assert (method, path) == ("DELETE", "/api/organizations/org-1/custom-properties/cp-1")
-        assert "cp-1" in result
+        assert (method, path) == ("DELETE", "/api/organizations/org_111111111111111111111111/custom-properties/cpd_666666666666666666666666")
+        assert "cpd_666666666666666666666666" in result
 
 
 class TestDocumentCustomProperties:
@@ -425,35 +415,42 @@ class TestDocumentCustomProperties:
         mock_client.request.return_value = api_response({"customProperties": []})
 
         await papra_mcp.papra_list_document_custom_properties(
-            papra_mcp.DocBase(organization_id="org-1", document_id="doc-1")
+            papra_mcp.DocBase(organization_id="org_111111111111111111111111", document_id="doc_333333333333333333333333")
         )
 
         method, path, _ = _request_call(mock_client)
         assert (method, path) == (
             "GET",
-            "/api/organizations/org-1/documents/doc-1/custom-properties",
+            "/api/organizations/org_111111111111111111111111/documents/doc_333333333333333333333333/custom-properties",
         )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "value",
+        ("property_type", "value"),
         [
-            "2026-01-31",          # date
-            "Acme GmbH",           # text
-            42,                    # number
-            19.99,                 # number
-            True,                  # boolean
-            ["opt-1", "opt-2"],    # multi_select
+            ("date", "2026-01-31"),
+            ("text", "Acme GmbH"),
+            ("number", 42),
+            ("number", 19.99),
+            ("boolean", True),
+            (
+                "multi_select",
+                ["cpso_777777777777777777777777", "cpso_888888888888888888888888"],
+            ),
+            ("multi_select", []),
+            ("user_relation", ["usr_999999999999999999999999"]),
+            ("document_relation", ["doc_444444444444444444444444"]),
         ],
     )
-    async def test_set_value_types(self, mock_client, api_response, value):
+    async def test_set_value_types(self, mock_client, api_response, property_type, value):
         mock_client.request.return_value = api_response(status_code=204)
 
         await papra_mcp.papra_set_document_custom_property(
             papra_mcp.SetDocPropertyInput(
-                organization_id="org-1",
-                document_id="doc-1",
-                property_definition_id="cp-1",
+                organization_id="org_111111111111111111111111",
+                document_id="doc_333333333333333333333333",
+                property_definition_id="cpd_666666666666666666666666",
+                property_type=property_type,
                 value=value,
             )
         )
@@ -461,7 +458,7 @@ class TestDocumentCustomProperties:
         method, path, kwargs = _request_call(mock_client)
         assert (method, path) == (
             "PUT",
-            "/api/organizations/org-1/documents/doc-1/custom-properties/cp-1",
+            "/api/organizations/org_111111111111111111111111/documents/doc_333333333333333333333333/custom-properties/cpd_666666666666666666666666",
         )
         assert kwargs["json"] == {"value": value}
 
@@ -472,9 +469,10 @@ class TestDocumentCustomProperties:
 
         await papra_mcp.papra_set_document_custom_property(
             papra_mcp.SetDocPropertyInput(
-                organization_id="org-1",
-                document_id="doc-1",
-                property_definition_id="cp-1",
+                organization_id="org_111111111111111111111111",
+                document_id="doc_333333333333333333333333",
+                property_definition_id="cpd_666666666666666666666666",
+                property_type="boolean",
                 value=True,
             )
         )
@@ -488,14 +486,14 @@ class TestDocumentCustomProperties:
 
         result = await papra_mcp.papra_clear_document_custom_property(
             papra_mcp.DocPropertyBase(
-                organization_id="org-1", document_id="doc-1", property_definition_id="cp-1"
+                organization_id="org_111111111111111111111111", document_id="doc_333333333333333333333333", property_definition_id="cpd_666666666666666666666666"
             )
         )
 
         method, path, _ = _request_call(mock_client)
         assert (method, path) == (
             "DELETE",
-            "/api/organizations/org-1/documents/doc-1/custom-properties/cp-1",
+            "/api/organizations/org_111111111111111111111111/documents/doc_333333333333333333333333/custom-properties/cpd_666666666666666666666666",
         )
         assert "cleared" in result
 
@@ -587,7 +585,7 @@ class TestStrictTextDecoding:
         parsed = json.loads(result)
         assert parsed["encoding"] == "base64"
         assert base64.b64decode(parsed["data"]) == payload
-        assert "�" not in result  # no replacement characters
+        assert "\ufffd" not in result  # no replacement characters
 
     @pytest.mark.asyncio
     async def test_unknown_charset_decodes_as_utf8(self, doc_params, monkeypatch):
@@ -628,7 +626,7 @@ def _returning(value):
 
 @pytest.fixture
 def doc_params():
-    return papra_mcp.DocBase(organization_id="org-1", document_id="doc-1")
+    return papra_mcp.DocBase(organization_id="org_111111111111111111111111", document_id="doc_333333333333333333333333")
 
 
 # ---------------------------------------------------------------------------
@@ -700,14 +698,14 @@ class TestToolErrorSemantics:
 
     @pytest.mark.asyncio
     async def test_api_error_raises(self, mock_client, api_response):
-        request = httpx.Request("GET", "http://test/api/organizations/org-1/tags")
+        request = httpx.Request("GET", "http://test/api/organizations/org_111111111111111111111111/tags")
         response = httpx.Response(403, json={"message": "Missing permission"}, request=request)
         mock_client.request.side_effect = httpx.HTTPStatusError(
             "Forbidden", request=request, response=response
         )
 
         with pytest.raises(ToolError) as excinfo:
-            await papra_mcp.papra_list_tags(papra_mcp.OrgBase(organization_id="org-1"))
+            await papra_mcp.papra_list_tags(papra_mcp.OrgBase(organization_id="org_111111111111111111111111"))
 
         assert "403" in str(excinfo.value)
         assert "Missing permission" in str(excinfo.value)
@@ -730,7 +728,7 @@ class TestToolErrorSemantics:
             with pytest.raises(ToolError, match="HTTP client not initialized"):
                 await papra_mcp.papra_create_document(
                     papra_mcp.CreateDocInput(
-                        organization_id="org-1",
+                        organization_id="org_111111111111111111111111",
                         file_name="a.txt",
                         file_content=base64.b64encode(b"hi").decode(),
                     )
@@ -754,7 +752,7 @@ class TestToolErrorSemantics:
 
 
 class TestToolRegistration:
-    """Every documented Papra endpoint must be reachable through a tool."""
+    """Only endpoints with proven API-key support are registered."""
 
     EXPECTED_TOOLS = {
         "papra_check_api_key",
@@ -774,9 +772,6 @@ class TestToolRegistration:
         "papra_update_document",
         "papra_reprocess_document",
         "papra_delete_document",
-        "papra_restore_document",
-        "papra_delete_document_permanently",
-        "papra_empty_trash",
         "papra_get_document_activity",
         "papra_list_tags",
         "papra_create_tag",
@@ -784,7 +779,6 @@ class TestToolRegistration:
         "papra_delete_tag",
         "papra_add_tag_to_document",
         "papra_remove_tag_from_document",
-        "papra_apply_tagging_rule",
         "papra_list_custom_properties",
         "papra_get_custom_property",
         "papra_create_custom_property",
