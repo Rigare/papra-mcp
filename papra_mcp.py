@@ -13,6 +13,7 @@ import sys
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import date, datetime
+from importlib.metadata import PackageNotFoundError, version
 from typing import Annotated, Any, Literal, ParamSpec
 from urllib.parse import quote, urlparse
 
@@ -290,7 +291,15 @@ def _body_from(fields: dict[str, Any], *, nullable_fields: tuple[str, ...] = ())
 # Server
 # ---------------------------------------------------------------------------
 
+try:
+    __version__ = version("papra-mcp")
+except PackageNotFoundError:  # running from a source checkout without install
+    __version__ = "0.0.0"
+
 mcp = FastMCP("papra_mcp", lifespan=lifespan)
+# FastMCP has no version argument; without this, serverInfo.version reports
+# the installed mcp library version instead of ours.
+mcp._mcp_server.version = __version__
 
 READ_ONLY = {
     "readOnlyHint": True,
