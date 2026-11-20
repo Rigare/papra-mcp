@@ -1,7 +1,8 @@
 # Papra MCP Server
 
+[![PyPI](https://img.shields.io/pypi/v/papra-mcp)](https://pypi.org/project/papra-mcp/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green)](https://github.com/Rigare/papra-mcp/blob/main/LICENSE)
 
 An [MCP](https://modelcontextprotocol.io) (Model Context Protocol) server for the [Papra](https://papra.app) document management API. Gives AI assistants the ability to manage organizations, documents, tags, and custom properties in your Papra instance.
 
@@ -15,6 +16,14 @@ Exposes 32 tools whose routes support Bearer API-key authentication. Session-onl
 - Papra monorepo version 0.3.0 at commit `648c223b807500f0258c822e0321d6ef4964f064`; compatibility with other server versions is not claimed
 
 ## Installation
+
+```bash
+pip install papra-mcp
+```
+
+Or run it without a permanent install via [uv](https://docs.astral.sh/uv/): `uvx papra-mcp`.
+
+From source:
 
 ```bash
 git clone https://github.com/Rigare/papra-mcp.git
@@ -44,8 +53,8 @@ Add the following to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "papra": {
-      "command": "python",
-      "args": ["/path/to/papra-mcp/papra_mcp.py"],
+      "command": "uvx",
+      "args": ["papra-mcp"],
       "env": {
         "PAPRA_BASE_URL": "https://papra.example.com",
         "PAPRA_API_KEY": "your-api-key-here"
@@ -60,10 +69,13 @@ Add the following to your `claude_desktop_config.json`:
 Add via the CLI:
 
 ```bash
-claude mcp add papra -- python /path/to/papra-mcp/papra_mcp.py
+claude mcp add papra \
+  -e PAPRA_BASE_URL=https://papra.example.com \
+  -e PAPRA_API_KEY=your-api-key-here \
+  -- uvx papra-mcp
 ```
 
-Then set the environment variables in your shell or `.env` file before launching Claude Code.
+If you installed with `pip`, use `papra-mcp` as the command instead of `uvx papra-mcp`.
 
 ### Development
 
@@ -271,6 +283,12 @@ Text above `PAPRA_MAX_CONTENT_BYTES` is truncated with an explicit marker. Binar
 
 Failed calls raise a `ToolError`, so the MCP result is flagged with `isError` and a model cannot mistake an API error for a successful response. Messages include the HTTP status and Papra's own error text.
 
+## Releasing
+
+1. Bump `version` in `pyproject.toml` and merge to `main`.
+2. Optional dry run: start the **Release** workflow manually to upload to TestPyPI.
+3. Publish a GitHub release tagged `vX.Y.Z` matching that version; the workflow uploads it to PyPI.
+
 ## License
 
-[Apache-2.0](LICENSE)
+[Apache-2.0](https://github.com/Rigare/papra-mcp/blob/main/LICENSE)
